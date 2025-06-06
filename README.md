@@ -22,6 +22,12 @@ python scripts/data.py AAPL --start 2020-01-01 --output apple.csv
 python scripts/train_model.py apple.csv
 ```
 
+4. Run a simple walk-forward backtest:
+
+```bash
+python scripts/backtest.py apple.csv
+```
+
 The training script will print classification metrics evaluating how well the model predicts the next-day price movement.
 
 This code is intended as a minimal example for experimentation only. Use caution and thoroughly backtest any trading strategy before using it with real funds.
