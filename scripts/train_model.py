@@ -2,6 +2,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
+import joblib
 from features import add_technical_indicators
 
 
@@ -14,7 +15,7 @@ def prepare_dataset(csv_path: str) -> pd.DataFrame:
     return df
 
 
-def train(df: pd.DataFrame):
+def train(df: pd.DataFrame) -> RandomForestClassifier:
     feature_cols = [
         'MA_20', 'MA_50', 'EMA_20', 'EMA_50',
         'BB_Upper', 'BB_Lower', 'MACD', 'MACD_Signal',
@@ -36,10 +37,13 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Train trading model")
     parser.add_argument('csv', help='CSV file with price data')
+    parser.add_argument('--model-out', default='model.pkl', help='File to save trained model')
     args = parser.parse_args()
 
     df = prepare_dataset(args.csv)
-    train(df)
+    model = train(df)
+    joblib.dump(model, args.model_out)
+    print(f"Saved model to {args.model_out}")
 
 
 if __name__ == "__main__":

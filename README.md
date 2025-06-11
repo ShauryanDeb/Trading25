@@ -18,10 +18,10 @@ python scripts/data.py AAPL --start none --output apple.csv
 
 Passing `--start none` uses the maximum history available from Yahoo Finance. You can also specify a custom start date if you only want recent data.
 
-3. Train a model using the downloaded data:
+3. Train a model using the downloaded data and save it for later use:
 
 ```bash
-python scripts/train_model.py apple.csv
+python scripts/train_model.py apple.csv --model-out apple_model.pkl
 ```
 
 The training script adds a number of technical indicators, including moving averages,
@@ -34,6 +34,14 @@ On-Balance Volume. These features are used as inputs to a RandomForest classifie
 ```bash
 python scripts/backtest.py apple.csv
 ```
+
+5. Generate live predictions using the saved model:
+
+```bash
+python scripts/realtime.py apple_model.pkl AAPL --interval 60
+```
+
+This script polls Yahoo Finance for the most recent minute data and prints the model's prediction each cycle.
 
 The training script will print classification metrics evaluating how well the model predicts the next-day price movement.
 
