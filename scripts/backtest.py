@@ -18,8 +18,13 @@ def backtest(csv_path: str) -> float:
         train_df = df.iloc[:i]
         test_df = df.iloc[i:i+1]
         model = RandomForestClassifier(n_estimators=100, random_state=42)
-        model.fit(train_df[['MA_20', 'MA_50', 'RSI_14']], train_df['Target'])
-        pred = model.predict(test_df[['MA_20', 'MA_50', 'RSI_14']])[0]
+        feature_cols = [
+            'MA_20', 'MA_50', 'EMA_20', 'EMA_50',
+            'BB_Upper', 'BB_Lower', 'MACD', 'MACD_Signal',
+            'RSI_14',
+        ]
+        model.fit(train_df[feature_cols], train_df['Target'])
+        pred = model.predict(test_df[feature_cols])[0]
         predictions.append(pred)
         test_indices.append(test_df.index[0])
 

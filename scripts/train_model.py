@@ -15,7 +15,12 @@ def prepare_dataset(csv_path: str) -> pd.DataFrame:
 
 
 def train(df: pd.DataFrame):
-    X = df[['MA_20', 'MA_50', 'RSI_14']]
+    feature_cols = [
+        'MA_20', 'MA_50', 'EMA_20', 'EMA_50',
+        'BB_Upper', 'BB_Lower', 'MACD', 'MACD_Signal',
+        'RSI_14',
+    ]
+    X = df[feature_cols]
     y = df['Target']
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, shuffle=False)
 

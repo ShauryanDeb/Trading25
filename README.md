@@ -10,17 +10,23 @@ This project provides a simple starting point for experimenting with stock tradi
 pip install -r requirements.txt
 ```
 
-2. Download historical data. For example, to download daily data for Apple:
+2. Download historical data. For example, to download the full history for Apple:
 
 ```bash
-python scripts/data.py AAPL --start 2020-01-01 --output apple.csv
+python scripts/data.py AAPL --start none --output apple.csv
 ```
+
+Passing `--start none` uses the maximum history available from Yahoo Finance. You can also specify a custom start date if you only want recent data.
 
 3. Train a model using the downloaded data:
 
 ```bash
 python scripts/train_model.py apple.csv
 ```
+
+The training script adds a number of technical indicators, including moving averages,
+exponential moving averages, Bollinger Bands, MACD and RSI. These features are used
+as inputs to a RandomForest classifier.
 
 4. Run a simple walk-forward backtest:
 
