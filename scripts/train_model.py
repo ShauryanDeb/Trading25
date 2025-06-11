@@ -18,7 +18,8 @@ def train(df: pd.DataFrame):
     feature_cols = [
         'MA_20', 'MA_50', 'EMA_20', 'EMA_50',
         'BB_Upper', 'BB_Lower', 'MACD', 'MACD_Signal',
-        'RSI_14',
+        'RSI_14', 'Stoch_%K', 'Stoch_%D', 'ATR_14',
+        'CCI_20', 'OBV'
     ]
     X = df[feature_cols]
     y = df['Target']

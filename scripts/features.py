@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 
 
 def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -27,6 +28,20 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     df["RSI_14"] = compute_rsi(df["Close"], window=14)
 
+    # Stochastic Oscillator
+    stoch_k, stoch_d = compute_stochastic(df, window=14)
+    df["Stoch_%K"] = stoch_k
+    df["Stoch_%D"] = stoch_d
+
+    # Average True Range
+    df["ATR_14"] = compute_atr(df, window=14)
+
+    # Commodity Channel Index
+    df["CCI_20"] = compute_cci(df, window=20)
+
+    # On-Balance Volume
+    df["OBV"] = compute_obv(df)
+
     return df
 
 
@@ -37,4 +52,42 @@ def compute_rsi(series: pd.Series, window: int = 14) -> pd.Series:
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
     return rsi
+
+
+def compute_stochastic(df: pd.DataFrame, window: int = 14) -> tuple[pd.Series, pd.Series]:
+    """Return %K and %D stochastic oscillator series."""
+    low_min = df["Low"].rolling(window=window).min()
+    high_max = df["High"].rolling(window=window).max()
+    percent_k = (df["Close"] - low_min) / (high_max - low_min) * 100
+    percent_d = percent_k.rolling(window=3).mean()
+    return percent_k, percent_d
+
+
+def compute_atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    high_low = df["High"] - df["Low"]
+    high_close = (df["High"] - df["Close"].shift()).abs()
+    low_close = (df["Low"] - df["Close"].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = tr.rolling(window=window).mean()
+    return atr
+
+
+def compute_cci(df: pd.DataFrame, window: int = 20) -> pd.Series:
+    tp = (df["High"] + df["Low"] + df["Close"]) / 3
+    sma = tp.rolling(window=window).mean()
+    mad = tp.rolling(window=window).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True)
+    cci = (tp - sma) / (0.015 * mad)
+    return cci
+
+
+def compute_obv(df: pd.DataFrame) -> pd.Series:
+    obv = [0]
+    for i in range(1, len(df)):
+        if df["Close"].iloc[i] > df["Close"].iloc[i - 1]:
+            obv.append(obv[-1] + df["Volume"].iloc[i])
+        elif df["Close"].iloc[i] < df["Close"].iloc[i - 1]:
+            obv.append(obv[-1] - df["Volume"].iloc[i])
+        else:
+            obv.append(obv[-1])
+    return pd.Series(obv, index=df.index)
 

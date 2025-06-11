@@ -25,8 +25,9 @@ python scripts/train_model.py apple.csv
 ```
 
 The training script adds a number of technical indicators, including moving averages,
-exponential moving averages, Bollinger Bands, MACD and RSI. These features are used
-as inputs to a RandomForest classifier.
+exponential moving averages, Bollinger Bands, MACD and RSI. It also computes
+Stochastic Oscillator values, Average True Range, Commodity Channel Index and
+On-Balance Volume. These features are used as inputs to a RandomForest classifier.
 
 4. Run a simple walk-forward backtest:
 
