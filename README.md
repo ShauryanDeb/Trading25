@@ -45,4 +45,12 @@ This script polls Yahoo Finance for the most recent minute data and prints the m
 
 The training script will print classification metrics evaluating how well the model predicts the next-day price movement.
 
+6. Evaluate a saved model on historical data:
+
+```bash
+python scripts/evaluate_model.py apple_model.pkl apple.csv
+```
+
+This script loads the saved model and CSV file and prints accuracy metrics on the known data so you can verify how well the model performs.
+
 This code is intended as a minimal example for experimentation only. Use caution and thoroughly backtest any trading strategy before using it with real funds.
