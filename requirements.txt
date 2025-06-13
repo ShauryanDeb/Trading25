@@ -1,6 +1,7 @@
 yfinance
 pandas
 scikit-learn
+numpy
 
 joblib
 backtrader

@@ -18,10 +18,20 @@ python scripts/data.py AAPL --start none --output apple.csv
 
 Passing `--start none` uses the maximum history available from Yahoo Finance. You can also specify a custom start date if you only want recent data.
 
-3. Train a model using the downloaded data and save it for later use:
+3. Optionally vectorize the data for faster loading:
+
+```bash
+python scripts/vectorize.py apple.csv --output apple.npz
+```
+
+4. Train a model using the downloaded data (CSV or NPZ) and save it for later use:
 
 ```bash
 python scripts/train_model.py apple.csv --model-out apple_model.pkl
+
+# or train from the vectorized file
+
+python scripts/train_model.py apple.npz --model-out apple_model.pkl
 ```
 
 The training script adds a number of technical indicators, including moving averages,

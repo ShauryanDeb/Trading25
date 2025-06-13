@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
@@ -13,6 +14,11 @@ def prepare_dataset(csv_path: str) -> pd.DataFrame:
     df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
     df.dropna(inplace=True)
     return df
+
+
+def load_npz_dataset(npz_path: str) -> tuple[np.ndarray, np.ndarray]:
+    data = np.load(npz_path)
+    return data['X'], data['y']
 
 
 def train(df: pd.DataFrame) -> RandomForestClassifier:
@@ -33,15 +39,29 @@ def train(df: pd.DataFrame) -> RandomForestClassifier:
     return model
 
 
+def train_arrays(X: np.ndarray, y: np.ndarray) -> RandomForestClassifier:
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, shuffle=False)
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+    preds = model.predict(X_test)
+    print(classification_report(y_test, preds))
+    return model
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Train trading model")
-    parser.add_argument('csv', help='CSV file with price data')
+    parser.add_argument('data', help='CSV or NPZ dataset')
     parser.add_argument('--model-out', default='model.pkl', help='File to save trained model')
     args = parser.parse_args()
 
-    df = prepare_dataset(args.csv)
-    model = train(df)
+    if args.data.lower().endswith('.npz'):
+        X, y = load_npz_dataset(args.data)
+        model = train_arrays(X, y)
+    else:
+        df = prepare_dataset(args.data)
+        model = train(df)
+
     joblib.dump(model, args.model_out)
     print(f"Saved model to {args.model_out}")
 
