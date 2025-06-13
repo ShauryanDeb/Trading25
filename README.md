@@ -35,7 +35,15 @@ On-Balance Volume. These features are used as inputs to a RandomForest classifie
 python scripts/backtest.py apple.csv
 ```
 
-5. Generate live predictions using the saved model:
+5. Run a configurable backtest using the `backtrader` library:
+
+```bash
+python scripts/backtrader_backtest.py apple_model.pkl apple.csv --threshold 0.6 --stake 1 --commission 0.001
+```
+
+This backtest uses the trained model's predicted probabilities to trade. The `threshold`, `stake`, and `commission` options can be tuned to search for the best return.
+
+6. Generate live predictions using the saved model:
 
 ```bash
 python scripts/realtime.py apple_model.pkl AAPL --interval 60
@@ -45,7 +53,7 @@ This script polls Yahoo Finance for the most recent minute data and prints the m
 
 The training script will print classification metrics evaluating how well the model predicts the next-day price movement.
 
-6. Evaluate a saved model on historical data:
+7. Evaluate a saved model on historical data:
 
 ```bash
 python scripts/evaluate_model.py apple_model.pkl apple.csv
