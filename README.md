@@ -39,13 +39,22 @@ exponential moving averages, Bollinger Bands, MACD and RSI. It also computes
 Stochastic Oscillator values, Average True Range, Commodity Channel Index and
 On-Balance Volume. These features are used as inputs to a RandomForest classifier.
 
-5. Run a simple walk-forward backtest:
+5. Optionally tune model hyperparameters with cross-validation:
+
+```bash
+python scripts/tune_model.py apple.csv
+```
+
+This script searches several `RandomForestClassifier` settings using a
+time-series split and prints the best parameters found.
+
+6. Run a simple walk-forward backtest:
 
 ```bash
 python scripts/backtest.py apple.csv
 ```
 
-6. Run a configurable backtest using the `backtrader` library:
+7. Run a configurable backtest using the `backtrader` library:
 
 ```bash
 python scripts/backtrader_backtest.py apple_model.pkl apple.csv --threshold 0.6 --stake 1 --commission 0.001
@@ -53,7 +62,7 @@ python scripts/backtrader_backtest.py apple_model.pkl apple.csv --threshold 0.6 
 
 This backtest uses the trained model's predicted probabilities to trade. The `threshold`, `stake`, and `commission` options can be tuned to search for the best return.
 
-7. Generate live predictions using the saved model:
+8. Generate live predictions using the saved model:
 
 ```bash
 python scripts/realtime.py apple_model.pkl AAPL --interval 60
@@ -63,7 +72,7 @@ This script polls Yahoo Finance for the most recent minute data and prints the m
 
 The training script will print classification metrics evaluating how well the model predicts the next-day price movement.
 
-8. Evaluate a saved model on historical data:
+9. Evaluate a saved model on historical data:
 
 ```bash
 python scripts/evaluate_model.py apple_model.pkl apple.csv
