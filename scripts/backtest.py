@@ -1,12 +1,15 @@
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from features import add_technical_indicators
+from features import add_technical_indicators, add_option_features, OPTION_FEATURES
 
 
-def backtest(csv_path: str) -> float:
+def backtest(csv_path: str, options_path: str | None = None) -> float:
     """Run a simple walk-forward backtest and return cumulative return."""
     df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
     df = add_technical_indicators(df)
+    if options_path:
+        opt_df = pd.read_csv(options_path, index_col=0, parse_dates=True)
+        df = add_option_features(df, opt_df)
     df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
     df.dropna(inplace=True)
 
@@ -22,8 +25,8 @@ def backtest(csv_path: str) -> float:
             'MA_20', 'MA_50', 'EMA_20', 'EMA_50',
             'BB_Upper', 'BB_Lower', 'MACD', 'MACD_Signal',
             'RSI_14', 'Stoch_%K', 'Stoch_%D', 'ATR_14',
-            'CCI_20', 'OBV'
-        ]
+            'CCI_20', 'OBV',
+        ] + OPTION_FEATURES
         model.fit(train_df[feature_cols], train_df['Target'])
         pred = model.predict(test_df[feature_cols])[0]
         predictions.append(pred)
@@ -44,6 +47,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Backtest trading strategy")
     parser.add_argument('csv', help='CSV file with price data')
+    parser.add_argument('--options', help='CSV with option features')
     args = parser.parse_args()
 
-    backtest(args.csv)
+    backtest(args.csv, args.options)

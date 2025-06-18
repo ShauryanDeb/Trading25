@@ -16,18 +16,24 @@ pip install -r requirements.txt
 python scripts/data.py AAPL --start none --output apple.csv
 ```
 
+You can also download a summary of the option chain for a specific expiration date:
+
+```bash
+python scripts/options_data.py AAPL 2025-12-19 --output options.csv
+```
+
 Passing `--start none` uses the maximum history available from Yahoo Finance. You can also specify a custom start date if you only want recent data.
 
 3. Optionally vectorize the data for faster loading:
 
 ```bash
-python scripts/vectorize.py apple.csv --output apple.npz
+python scripts/vectorize.py apple.csv --options options.csv --output apple.npz
 ```
 
 4. Train a model using the downloaded data (CSV or NPZ) and save it for later use:
 
 ```bash
-python scripts/train_model.py apple.csv --model-out apple_model.pkl
+python scripts/train_model.py apple.csv --options options.csv --model-out apple_model.pkl
 
 # or train from the vectorized file
 
@@ -42,7 +48,7 @@ On-Balance Volume. These features are used as inputs to a RandomForest classifie
 5. Optionally tune model hyperparameters with cross-validation:
 
 ```bash
-python scripts/tune_model.py apple.csv
+python scripts/tune_model.py apple.csv --options options.csv
 ```
 
 This script searches several `RandomForestClassifier` settings using a
@@ -51,13 +57,13 @@ time-series split and prints the best parameters found.
 6. Run a simple walk-forward backtest:
 
 ```bash
-python scripts/backtest.py apple.csv
+python scripts/backtest.py apple.csv --options options.csv
 ```
 
 7. Run a configurable backtest using the `backtrader` library:
 
 ```bash
-python scripts/backtrader_backtest.py apple_model.pkl apple.csv --threshold 0.6 --stake 1 --commission 0.001
+python scripts/backtrader_backtest.py apple_model.pkl apple.csv --options options.csv --threshold 0.6 --stake 1 --commission 0.001
 ```
 
 This backtest uses the trained model's predicted probabilities to trade. The `threshold`, `stake`, and `commission` options can be tuned to search for the best return.
@@ -65,7 +71,7 @@ This backtest uses the trained model's predicted probabilities to trade. The `th
 8. Generate live predictions using the saved model:
 
 ```bash
-python scripts/realtime.py apple_model.pkl AAPL --interval 60
+python scripts/realtime.py apple_model.pkl AAPL --options options.csv --interval 60
 ```
 
 This script polls Yahoo Finance for the most recent minute data and prints the model's prediction each cycle.
@@ -75,7 +81,7 @@ The training script will print classification metrics evaluating how well the mo
 9. Evaluate a saved model on historical data:
 
 ```bash
-python scripts/evaluate_model.py apple_model.pkl apple.csv
+python scripts/evaluate_model.py apple_model.pkl apple.csv --options options.csv
 ```
 
 This script loads the saved model and CSV file and prints accuracy metrics on the known data so you can verify how well the model performs.

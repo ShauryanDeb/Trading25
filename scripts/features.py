@@ -45,6 +45,20 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+OPTION_FEATURES = [
+    "CallVolume", "PutVolume", "CallOI", "PutOI", "CallIV", "PutIV"
+]
+
+
+def add_option_features(df: pd.DataFrame, opt_df: pd.DataFrame) -> pd.DataFrame:
+    """Merge option-based features into the price dataframe."""
+    opt_df = opt_df.copy()
+    opt_df.index = pd.to_datetime(opt_df.index)
+    df = df.join(opt_df[OPTION_FEATURES], how="left")
+    df[OPTION_FEATURES] = df[OPTION_FEATURES].fillna(method="ffill")
+    return df
+
+
 def compute_rsi(series: pd.Series, window: int = 14) -> pd.Series:
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
