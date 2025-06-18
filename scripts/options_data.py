@@ -6,8 +6,19 @@ OPTION_COLS = [
     "CallVolume", "PutVolume", "CallOI", "PutOI", "CallIV", "PutIV"
 ]
 
-def fetch_options_summary(ticker: str, expiration: str) -> pd.DataFrame:
+
+def get_nearest_expiration(ticker: str) -> str:
+    """Return the nearest expiration date available for the ticker."""
+    t = yf.Ticker(ticker)
+    expirations = t.options
+    if not expirations:
+        raise ValueError(f"No option expirations found for {ticker}")
+    return expirations[0]
+
+def fetch_options_summary(ticker: str, expiration: str | None = None) -> pd.DataFrame:
     """Fetch option chain summary for a single expiration date."""
+    if expiration is None:
+        expiration = get_nearest_expiration(ticker)
     t = yf.Ticker(ticker)
     chain = t.option_chain(expiration)
     calls = chain.calls
@@ -27,7 +38,7 @@ def fetch_options_summary(ticker: str, expiration: str) -> pd.DataFrame:
 def main():
     parser = argparse.ArgumentParser(description="Download option chain summary")
     parser.add_argument("ticker", help="Underlying ticker")
-    parser.add_argument("expiration", help="Expiration date YYYY-MM-DD")
+    parser.add_argument("--expiration", help="Expiration date YYYY-MM-DD (default nearest)")
     parser.add_argument("--output", default="options.csv", help="Output CSV file")
     args = parser.parse_args()
 

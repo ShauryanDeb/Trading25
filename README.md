@@ -71,10 +71,10 @@ This backtest uses the trained model's predicted probabilities to trade. The `th
 8. Generate live predictions using the saved model:
 
 ```bash
-python scripts/realtime.py apple_model.pkl AAPL --options options.csv --interval 60
+python scripts/realtime.py apple_model.pkl AAPL --interval 60 --expiration 2025-12-19
 ```
 
-This script polls Yahoo Finance for the most recent minute data and prints the model's prediction each cycle.
+This script polls Yahoo Finance for the most recent minute data and prints the model's prediction each cycle. If you provide `--expiration`, the script will fetch the latest option chain summary on each poll. Alternatively, you can pass `--options` to supply precomputed option features from a CSV file.
 
 The training script will print classification metrics evaluating how well the model predicts the next-day price movement.
 

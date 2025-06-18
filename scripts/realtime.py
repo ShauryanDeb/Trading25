@@ -4,6 +4,7 @@ import joblib
 import pandas as pd
 import yfinance as yf
 from features import add_technical_indicators, add_option_features, OPTION_FEATURES
+from options_data import fetch_options_summary
 
 FEATURE_COLS = [
     'MA_20', 'MA_50', 'EMA_20', 'EMA_50',
@@ -17,7 +18,7 @@ def fetch_recent_data(ticker: str, period: str = "60d", interval: str = "1m") ->
     df = yf.download(ticker, period=period, interval=interval, progress=False)
     return df
 
-def run(model_path: str, ticker: str, poll_interval: int, options_path: str | None = None) -> None:
+def run(model_path: str, ticker: str, poll_interval: int, options_path: str | None = None, expiration: str | None = None) -> None:
     model = joblib.load(model_path)
     print(f"Loaded model from {model_path}. Polling {ticker} every {poll_interval}s...")
     while True:
@@ -25,6 +26,10 @@ def run(model_path: str, ticker: str, poll_interval: int, options_path: str | No
         df = add_technical_indicators(df)
         if options_path:
             opt_df = pd.read_csv(options_path, index_col=0, parse_dates=True)
+            df = add_option_features(df, opt_df)
+        elif expiration:
+            opt_df = fetch_options_summary(ticker, expiration)
+            opt_df.index = [df.index[-1]]
             df = add_option_features(df, opt_df)
         df.dropna(inplace=True)
         latest = df.iloc[-1:]
@@ -42,8 +47,9 @@ def main():
     parser.add_argument("ticker", help="Ticker symbol to monitor")
     parser.add_argument("--interval", type=int, default=60, help="Polling interval in seconds")
     parser.add_argument("--options", help="CSV with option features")
+    parser.add_argument("--expiration", help="Fetch option summary for this expiration date")
     args = parser.parse_args()
-    run(args.model, args.ticker, args.interval, args.options)
+    run(args.model, args.ticker, args.interval, args.options, args.expiration)
 
 
 if __name__ == "__main__":
