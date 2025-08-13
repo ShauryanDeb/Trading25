@@ -1,0 +1,2 @@
+,initial_rows,duplicate_timestamps,missing_data,invalid_prices,invalid_ohlc,price_outliers,volume_outliers,rows_after_cleaning,data_completeness,price_consistency,download_info
+0,1373,0,"{'Open': 0, 'High': 0, 'Low': 0, 'Close': 0, 'Volume': 0}",0,0,0,0,1373,1.0,1.0,"{'symbol': 'AAPL', 'start_date': '2020-01-02 00:00:00-05:00', 'end_date': '2025-06-18 00:00:00-04:00', 'trading_days': 1373, 'interval': '1d'}"
