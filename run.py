@@ -24,7 +24,7 @@ def cmd_train(args):
     model.fit(X, y)
     out = Path(args.output)
     model.save(out)
-    print(f"Model saved → {out}")
+    print(f"Model saved -> {out}")
 
 
 def cmd_backtest(args):
