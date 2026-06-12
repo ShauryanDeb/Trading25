@@ -115,13 +115,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Paper-trading scheduler")
     parser.add_argument(
         "--test-now", action="store_true",
-        help="Run one cycle immediately (dry-run) then exit — for testing outside market hours",
+        help="Run one cycle immediately in dry-run mode (no orders placed) then exit",
+    )
+    parser.add_argument(
+        "--run-now", action="store_true",
+        help="Run one live cycle immediately (real paper orders) then exit",
     )
     args = parser.parse_args()
 
     if args.test_now:
-        log.info("Scheduler running (test-now mode)")
+        log.info("Scheduler running (test-now dry-run mode)")
         run_cycle(dry_run=True)
+        return
+
+    if args.run_now:
+        log.info("Scheduler running (run-now LIVE mode)")
+        run_cycle(dry_run=False)
         return
 
     from apscheduler.schedulers.blocking import BlockingScheduler
