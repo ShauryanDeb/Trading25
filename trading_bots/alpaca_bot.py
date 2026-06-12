@@ -42,14 +42,28 @@ log = logging.getLogger(__name__)
 # Universe
 # ---------------------------------------------------------------------------
 UNIVERSE = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL",
-    "META", "TSLA", "JPM", "V", "MA",
-    "UNH", "HD", "COST", "LLY", "AVGO",
-    "PEP", "MCD", "BAC", "WMT", "DIS",
+    # Mega-cap tech
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "ORCL", "ADBE",
+    "CRM", "AMD", "INTC", "QCOM", "TXN", "MU", "AMAT", "LRCX", "KLAC", "SNPS",
+    # Financials
+    "JPM", "BAC", "WFC", "GS", "MS", "BLK", "SCHW", "AXP", "V", "MA",
+    "COF", "USB", "PNC", "TFC", "CME", "ICE", "CB", "PGR", "MET", "AIG",
+    # Healthcare
+    "UNH", "LLY", "JNJ", "ABBV", "MRK", "TMO", "ABT", "DHR", "BMY", "AMGN",
+    "GILD", "ISRG", "VRTX", "REGN", "ZTS", "SYK", "BSX", "MDT", "ELV", "CVS",
+    # Consumer
+    "WMT", "COST", "HD", "MCD", "SBUX", "NKE", "TGT", "LOW", "TJX", "BKNG",
+    "MAR", "HLT", "YUM", "DPZ", "CMG", "ORLY", "AZO", "TSCO", "DG", "DLTR",
+    # Industrials & Energy
+    "CAT", "DE", "HON", "GE", "RTX", "LMT", "BA", "UPS", "FDX", "NSC",
+    "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "MPC", "VLO", "PSX", "HES",
+    # Other large-caps
+    "PEP", "KO", "PG", "MO", "PM", "DIS", "NFLX", "T", "VZ", "CMCSA",
 ]
 
 MAX_POSITION_PCT = 0.05   # 5% of portfolio per symbol
-BUY_THRESHOLD = 0.55      # predict_proba > this => BUY
+TOP_N = 20                # max positions held at once (rank-and-cap)
+BUY_THRESHOLD = 0.55      # predict_proba > this => BUY candidate
 SELL_THRESHOLD = 0.45     # predict_proba < this => SELL/SKIP
 STOP_LOSS_PCT = -0.07     # -7% from entry => stop-loss
 
@@ -179,11 +193,21 @@ def rebalance(client, model, dry_run: bool = False) -> list[dict]:
             else:
                 log.info("  [DRY-RUN] Would close %s", sym)
 
-    # Open positions for buy signals
+    # Rank buy candidates by proba, cap at TOP_N
+    buy_candidates = sorted(
+        [(sym, p) for sym, p in signals.items() if p > BUY_THRESHOLD],
+        key=lambda x: x[1],
+        reverse=True,
+    )[:TOP_N]
+    log.info(
+        "Buy candidates: %d above threshold, keeping top %d",
+        len([p for p in signals.values() if p > BUY_THRESHOLD]),
+        len(buy_candidates),
+    )
+
+    # Open positions for ranked buy signals
     max_alloc = portfolio_value * MAX_POSITION_PCT
-    for sym, proba in signals.items():
-        if proba <= BUY_THRESHOLD:
-            continue
+    for sym, proba in buy_candidates:
         current_val = current_positions.get(sym, {}).get("market_value", 0.0)
         if current_val >= max_alloc * 0.95:
             log.info("  %s already fully allocated", sym)
