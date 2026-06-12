@@ -1,30 +1,33 @@
 """Alpaca paper-trading bot using alpaca-py SDK.
 
-Loads a trained StockEnsemble model, runs daily signals for the top-20
-S&P 500 names, and rebalances at market open — long-only, 5% max position.
+Loads a trained StockEnsemble model, generates signals via predict_proba,
+and rebalances at market open — long-only, 5% max position, -7% stop-loss.
 
 Environment (.env):
-    APCA_API_KEY_ID     — Alpaca paper key
-    APCA_API_SECRET_KEY — Alpaca paper secret
-    MODEL_PATH          — path to saved StockEnsemble .pkl  (default: models/model.pkl)
+    APCA_API_KEY_ID     -- Alpaca paper key
+    APCA_API_SECRET_KEY -- Alpaca paper secret
+    MODEL_PATH          -- path to saved StockEnsemble .pkl  (default: models/model.pkl)
+
+Flags:
+    --dry-run   Connect to Alpaca, print positions/buying power, run one signal
+                cycle but do NOT place any orders.
 """
 from __future__ import annotations
 
+import argparse
 import logging
 import os
-import time
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Ensure project root is on sys.path when run as a script from any directory
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 import pandas as pd
 from dotenv import load_dotenv
-
-from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce
-from alpaca.trading.requests import MarketOrderRequest
-
-from pipeline.features import build_features_for_symbol
-from pipeline.model import StockEnsemble
 
 load_dotenv()
 
@@ -38,43 +41,59 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Universe
 # ---------------------------------------------------------------------------
-TOP20_SP500 = [
+UNIVERSE = [
     "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL",
-    "META", "TSLA", "BRK-B", "JPM", "UNH",
-    "V", "XOM", "LLY", "JNJ", "AVGO",
-    "MA", "HD", "PG", "MRK", "COST",
+    "META", "TSLA", "JPM", "V", "MA",
+    "UNH", "HD", "COST", "LLY", "AVGO",
+    "PEP", "MCD", "BAC", "WMT", "DIS",
 ]
 
-MAX_POSITION_PCT = 0.05  # 5% of portfolio per symbol
+MAX_POSITION_PCT = 0.05   # 5% of portfolio per symbol
+BUY_THRESHOLD = 0.55      # predict_proba > this => BUY
+SELL_THRESHOLD = 0.45     # predict_proba < this => SELL/SKIP
+STOP_LOSS_PCT = -0.07     # -7% from entry => stop-loss
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_client() -> TradingClient:
-    key = os.environ["APCA_API_KEY_ID"]
-    secret = os.environ["APCA_API_SECRET_KEY"]
+def _get_client():
+    from alpaca.trading.client import TradingClient
+    key = os.environ.get("APCA_API_KEY_ID")
+    secret = os.environ.get("APCA_API_SECRET_KEY")
+    if not key or not secret:
+        raise EnvironmentError(
+            "APCA_API_KEY_ID and APCA_API_SECRET_KEY must be set in .env"
+        )
     return TradingClient(key, secret, paper=True)
 
 
-def _portfolio_value(client: TradingClient) -> float:
-    account = client.get_account()
-    return float(account.portfolio_value)
+def _portfolio_value(client) -> float:
+    return float(client.get_account().portfolio_value)
 
 
-def _current_positions(client: TradingClient) -> dict[str, float]:
-    """Return {symbol: market_value} for open positions."""
-    positions = client.get_all_positions()
-    return {p.symbol: float(p.market_value) for p in positions}
+def _buying_power(client) -> float:
+    return float(client.get_account().buying_power)
+
+
+def _current_positions(client) -> dict[str, dict]:
+    """Return {symbol: {market_value, avg_entry_price, qty}}."""
+    result = {}
+    for p in client.get_all_positions():
+        result[p.symbol] = {
+            "market_value": float(p.market_value),
+            "avg_entry_price": float(p.avg_entry_price),
+            "qty": float(p.qty),
+        }
+    return result
 
 
 def _latest_price(symbol: str) -> float | None:
-    """Pull yesterday's close from yfinance as a proxy for current price."""
+    """Fetch latest close from yfinance (fallback when market closed)."""
     try:
         import yfinance as yf
-        ticker = yf.Ticker(symbol)
-        hist = ticker.history(period="2d")
+        hist = yf.Ticker(symbol).history(period="2d")
         if hist.empty:
             return None
         return float(hist["Close"].iloc[-1])
@@ -82,18 +101,21 @@ def _latest_price(symbol: str) -> float | None:
         return None
 
 
-def _generate_signals(model: StockEnsemble, symbols: list[str]) -> dict[str, int]:
-    """Return {symbol: signal} where signal ∈ {0, 1}."""
-    signals: dict[str, int] = {}
+def _generate_signals(model, symbols: list[str]) -> dict[str, float]:
+    """Return {symbol: proba_up} for each symbol using predict_proba."""
+    from pipeline.features import build_features_for_symbol
+
+    signals: dict[str, float] = {}
     for sym in symbols:
         try:
             feats = build_features_for_symbol(sym)
             if feats.empty:
+                log.warning("  %s: empty features, skipping", sym)
                 continue
             latest = feats.iloc[[-1]]
-            signal = int(model.predict(latest)[0])
-            signals[sym] = signal
-            log.info("  %s → signal=%d", sym, signal)
+            proba = float(model.predict_proba(latest)[0][1])
+            signals[sym] = proba
+            log.info("  %s  proba_up=%.3f", sym, proba)
         except Exception as e:
             log.warning("  %s signal failed: %s", sym, e)
     return signals
@@ -103,49 +125,102 @@ def _generate_signals(model: StockEnsemble, symbols: list[str]) -> dict[str, int
 # Rebalance logic
 # ---------------------------------------------------------------------------
 
-def rebalance(client: TradingClient, model: StockEnsemble) -> None:
+def rebalance(client, model, dry_run: bool = False) -> list[dict]:
+    """Run one rebalance cycle. Returns list of trade dicts for logging."""
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import MarketOrderRequest
+
     portfolio_value = _portfolio_value(client)
-    log.info("Portfolio value: $%.2f", portfolio_value)
+    buying_power = _buying_power(client)
+    log.info("Portfolio value: $%.2f  |  Buying power: $%.2f", portfolio_value, buying_power)
 
     current_positions = _current_positions(client)
-    signals = _generate_signals(model, TOP20_SP500)
+    log.info("Open positions: %s", list(current_positions.keys()) or "none")
 
-    # Symbols to be long (signal=1)
-    long_symbols = [s for s, sig in signals.items() if sig == 1]
+    signals = _generate_signals(model, UNIVERSE)
+    trades = []
+
+    # Check stop-losses on existing positions
+    for sym, pos in current_positions.items():
+        price = _latest_price(sym)
+        if price and pos["avg_entry_price"] > 0:
+            pnl_pct = (price - pos["avg_entry_price"]) / pos["avg_entry_price"]
+            if pnl_pct <= STOP_LOSS_PCT:
+                log.info("STOP-LOSS triggered for %s (PnL=%.2f%%)", sym, pnl_pct * 100)
+                if not dry_run:
+                    try:
+                        client.close_position(sym)
+                        trades.append({
+                            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                            "symbol": sym, "side": "sell", "qty": pos["qty"],
+                            "price": price, "signal_proba": signals.get(sym, 0.0),
+                        })
+                    except Exception as e:
+                        log.warning("  Stop-loss close failed for %s: %s", sym, e)
+                else:
+                    log.info("  [DRY-RUN] Would close %s (stop-loss)", sym)
+
+    # Close positions where signal dropped below sell threshold
+    for sym, pos in current_positions.items():
+        proba = signals.get(sym, 0.0)
+        if proba < SELL_THRESHOLD:
+            log.info("Closing %s (proba=%.3f < %.2f)", sym, proba, SELL_THRESHOLD)
+            if not dry_run:
+                try:
+                    client.close_position(sym)
+                    price = _latest_price(sym) or pos["avg_entry_price"]
+                    trades.append({
+                        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                        "symbol": sym, "side": "sell", "qty": pos["qty"],
+                        "price": price, "signal_proba": proba,
+                    })
+                except Exception as e:
+                    log.warning("  Failed to close %s: %s", sym, e)
+            else:
+                log.info("  [DRY-RUN] Would close %s", sym)
+
+    # Open positions for buy signals
     max_alloc = portfolio_value * MAX_POSITION_PCT
-
-    # Close positions for symbols with signal=0
-    for sym, mkt_val in current_positions.items():
-        if sym not in signals or signals[sym] == 0:
-            log.info("Closing position: %s ($%.2f)", sym, mkt_val)
-            try:
-                client.close_position(sym)
-            except Exception as e:
-                log.warning("  Failed to close %s: %s", sym, e)
-
-    # Open / top-up positions for long signals
-    for sym in long_symbols:
-        current_val = current_positions.get(sym, 0.0)
-        if current_val >= max_alloc * 0.95:  # already fully allocated
+    for sym, proba in signals.items():
+        if proba <= BUY_THRESHOLD:
+            continue
+        current_val = current_positions.get(sym, {}).get("market_value", 0.0)
+        if current_val >= max_alloc * 0.95:
+            log.info("  %s already fully allocated", sym)
             continue
         price = _latest_price(sym)
-        if price is None or price <= 0:
+        if not price or price <= 0:
             log.warning("  No price for %s, skipping", sym)
             continue
         target_qty = int(max_alloc / price)
         if target_qty < 1:
             continue
-        log.info("Buying %d shares of %s @ ~$%.2f", target_qty, sym, price)
-        try:
-            order = MarketOrderRequest(
-                symbol=sym,
-                qty=target_qty,
-                side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY,
-            )
-            client.submit_order(order)
-        except Exception as e:
-            log.warning("  Order failed for %s: %s", sym, e)
+        log.info("BUY %d x %s @ ~$%.2f (proba=%.3f)", target_qty, sym, price, proba)
+        if not dry_run:
+            try:
+                order = MarketOrderRequest(
+                    symbol=sym,
+                    qty=target_qty,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY,
+                )
+                client.submit_order(order)
+                trades.append({
+                    "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                    "symbol": sym, "side": "buy", "qty": target_qty,
+                    "price": price, "signal_proba": proba,
+                })
+            except Exception as e:
+                log.warning("  Order failed for %s: %s", sym, e)
+        else:
+            log.info("  [DRY-RUN] Would buy %d x %s", target_qty, sym)
+            trades.append({
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                "symbol": sym, "side": "buy_dry_run", "qty": target_qty,
+                "price": price, "signal_proba": proba,
+            })
+
+    return trades
 
 
 # ---------------------------------------------------------------------------
@@ -153,30 +228,44 @@ def rebalance(client: TradingClient, model: StockEnsemble) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Alpaca paper-trading bot")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Connect to Alpaca, print state, run signals but skip order submission",
+    )
+    args = parser.parse_args()
+
     model_path = Path(os.getenv("MODEL_PATH", "models/model.pkl"))
     if not model_path.exists():
         raise FileNotFoundError(
-            f"Model not found at {model_path}. "
-            "Run `python run.py train <symbol>` first."
+            f"Model not found at {model_path}. Run `python run.py train <symbol>` first."
         )
 
+    from pipeline.model import StockEnsemble
     log.info("Loading model from %s", model_path)
     model = StockEnsemble.load(model_path)
-    client = _get_client()
 
-    log.info("Starting daily rebalance loop (Ctrl-C to stop)...")
-    while True:
-        now = datetime.now(tz=timezone.utc)
-        # Run once at ~09:31 ET (13:31 UTC) on weekdays
-        if now.weekday() < 5 and now.hour == 13 and now.minute == 31:
-            log.info("--- Market open rebalance %s ---", now.date())
-            try:
-                rebalance(client, model)
-            except Exception as e:
-                log.error("Rebalance error: %s", e)
-            time.sleep(60)  # avoid double-fire within the same minute
-        else:
-            time.sleep(30)
+    client = _get_client()
+    log.info("Connected to Alpaca paper API")
+
+    if args.dry_run:
+        log.info("=== DRY-RUN: one signal cycle, no orders placed ===")
+        rebalance(client, model, dry_run=True)
+        log.info("=== DRY-RUN complete ===")
+    else:
+        import time
+        log.info("Starting daily rebalance loop (Ctrl-C to stop)...")
+        while True:
+            now = datetime.now(tz=timezone.utc)
+            if now.weekday() < 5 and now.hour == 14 and now.minute == 35:
+                log.info("--- 9:35 ET rebalance %s ---", now.date())
+                try:
+                    rebalance(client, model, dry_run=False)
+                except Exception as e:
+                    log.error("Rebalance error: %s", e)
+                time.sleep(60)
+            else:
+                time.sleep(30)
 
 
 if __name__ == "__main__":
