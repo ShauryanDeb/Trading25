@@ -7,7 +7,7 @@ from pathlib import Path
 def cmd_fetch(args):
     from pipeline.data import fetch
     df = fetch(args.symbol, start=args.start, end=args.end, force_refresh=args.refresh)
-    print(f"Fetched {len(df)} rows for {args.symbol}  ({df.index[0].date()} → {df.index[-1].date()})")
+    print(f"Fetched {len(df)} rows for {args.symbol}  ({df.index[0].date()} to {df.index[-1].date()})")
 
 
 def cmd_train(args):
