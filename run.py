@@ -10,15 +10,39 @@ def cmd_fetch(args):
     print(f"Fetched {len(df)} rows for {args.symbol}  ({df.index[0].date()} to {df.index[-1].date()})")
 
 
+UNIVERSE = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL",
+    "META", "TSLA", "JPM", "V", "MA",
+    "UNH", "HD", "COST", "LLY", "AVGO",
+    "PEP", "MCD", "BAC", "WMT", "DIS",
+]
+
+
 def cmd_train(args):
+    import pandas as pd
     from pipeline.features import build_features_for_symbol
     from pipeline.model import StockEnsemble
 
-    print(f"Building features for {args.symbol}...")
-    feats = build_features_for_symbol(args.symbol, start=args.start)
-    X = feats.drop(columns=["Target"])
-    y = feats["Target"]
-    print(f"  {len(feats)} samples, {X.shape[1]} features")
+    symbols = UNIVERSE if args.universe else [args.symbol]
+    frames = []
+    for sym in symbols:
+        print(f"Building features for {sym}...")
+        try:
+            feats = build_features_for_symbol(sym, start=args.start)
+            frames.append(feats)
+            print(f"  {len(feats)} samples")
+        except Exception as e:
+            print(f"  SKIP {sym}: {e}")
+
+    if not frames:
+        print("No data — aborting.")
+        sys.exit(1)
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.sample(frac=1, random_state=42).reset_index(drop=True)
+    X = combined.drop(columns=["Target"])
+    y = combined["Target"]
+    print(f"\nTotal: {len(combined)} samples from {len(frames)} symbols, {X.shape[1]} features")
 
     model = StockEnsemble()
     model.fit(X, y)
@@ -56,7 +80,10 @@ def main():
 
     # train
     p_train = sub.add_parser("train", help="Train ensemble model")
-    p_train.add_argument("symbol")
+    p_train.add_argument("symbol", nargs="?", default="AAPL",
+                         help="Single symbol to train on (ignored if --universe is set)")
+    p_train.add_argument("--universe", action="store_true",
+                         help="Train on all 20 universe symbols (recommended)")
     p_train.add_argument("--start", default="2015-01-01")
     p_train.add_argument("--output", default="models/model.pkl")
 
