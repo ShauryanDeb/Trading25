@@ -35,6 +35,11 @@ def cmd_backtest(args):
     feats = build_features_for_symbol(args.symbol, start=args.start)
     results = walk_forward(feats, n_folds=args.folds)
     tbl = summary(results)
+    if getattr(args, "verbose", False):
+        for r in results:
+            print(f"Fold {r.fold}: Sharpe={r.sharpe:.3f}  MaxDD={r.max_drawdown:.2%}  "
+                  f"Return={r.total_return:.2%}  Trades={r.n_trades}")
+        print()
     print(tbl.to_string(index=False))
 
 
@@ -60,6 +65,7 @@ def main():
     p_bt.add_argument("symbol")
     p_bt.add_argument("--start", default="2015-01-01")
     p_bt.add_argument("--folds", type=int, default=5)
+    p_bt.add_argument("-v", "--verbose", action="store_true")
 
     args = parser.parse_args()
     {"fetch": cmd_fetch, "train": cmd_train, "backtest": cmd_backtest}[args.command](args)

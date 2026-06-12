@@ -117,8 +117,8 @@ def summary(results: List[FoldResult]) -> pd.DataFrame:
         rows.append(
             {
                 "Fold": r.fold,
-                "Train": f"{r.train_start} → {r.train_end}",
-                "Test": f"{r.test_start} → {r.test_end}",
+                "Train": f"{r.train_start} to {r.train_end}",
+                "Test": f"{r.test_start} to {r.test_end}",
                 "Accuracy": f"{r.accuracy:.2%}",
                 "Sharpe": f"{r.sharpe:.2f}",
                 "MaxDD": f"{r.max_drawdown:.2%}",
