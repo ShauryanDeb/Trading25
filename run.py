@@ -52,7 +52,8 @@ def cmd_train(args):
         sys.exit(1)
 
     combined = pd.concat(frames, ignore_index=True)
-    combined = combined.sample(frac=1, random_state=42).reset_index(drop=True)
+    # Keep chronological order across stocks — shuffling multi-stock time series
+    # causes look-ahead bias (future rows train on past test rows).
     X = combined.drop(columns=["Target"])
     y = combined["Target"]
     print(f"\nTotal: {len(combined)} samples from {len(frames)} symbols, {X.shape[1]} features")

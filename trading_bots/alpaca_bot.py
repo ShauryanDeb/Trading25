@@ -63,9 +63,30 @@ UNIVERSE = [
 
 MAX_POSITION_PCT = 0.05   # 5% of portfolio per symbol
 TOP_N = 20                # max positions held at once (rank-and-cap)
-BUY_THRESHOLD = 0.55      # predict_proba > this => BUY candidate
-SELL_THRESHOLD = 0.45     # predict_proba < this => SELL/SKIP
+MAX_PER_SECTOR = 3        # max concurrent positions within one GICS sector
+MAX_HOLD_DAYS = 5         # force-exit after 5 trading days regardless of signal
+BUY_THRESHOLD = 0.40      # predict_proba > this => BUY candidate
+SELL_THRESHOLD = 0.36     # predict_proba < this => SELL/SKIP
 STOP_LOSS_PCT = -0.07     # -7% from entry => stop-loss
+
+SECTOR_MAP: dict[str, list[str]] = {
+    "Tech":        ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","ORCL","ADBE",
+                    "CRM","AMD","INTC","QCOM","TXN","MU","AMAT","LRCX","KLAC","SNPS"],
+    "Financials":  ["JPM","BAC","WFC","GS","MS","BLK","SCHW","AXP","V","MA",
+                    "COF","USB","PNC","TFC","CME","ICE","CB","PGR","MET","AIG"],
+    "Healthcare":  ["UNH","LLY","JNJ","ABBV","MRK","TMO","ABT","DHR","BMY","AMGN",
+                    "GILD","ISRG","VRTX","REGN","ZTS","SYK","BSX","MDT","ELV","CVS"],
+    "Consumer":    ["WMT","COST","HD","MCD","SBUX","NKE","TGT","LOW","TJX","BKNG",
+                    "MAR","HLT","YUM","DPZ","CMG","ORLY","AZO","TSCO","DG","DLTR",
+                    "PEP","KO","PG","MO","PM"],
+    "Industrials": ["CAT","DE","HON","GE","RTX","LMT","BA","UPS","FDX","NSC"],
+    "Energy":      ["XOM","CVX","COP","SLB","EOG","OXY","MPC","VLO","PSX","DVN"],
+    "Comms":       ["DIS","NFLX","T","VZ","CMCSA"],
+}
+# Reverse lookup: symbol -> sector
+_SYM_TO_SECTOR: dict[str, str] = {
+    sym: sector for sector, syms in SECTOR_MAP.items() for sym in syms
+}
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +136,24 @@ def _latest_price(symbol: str) -> float | None:
         return None
 
 
+def _entry_dates() -> dict[str, pd.Timestamp]:
+    """Scan trade CSVs to find the most recent buy date for each symbol."""
+    dates: dict[str, pd.Timestamp] = {}
+    report_dir = Path(__file__).resolve().parent.parent / "reports"
+    for csv_path in sorted(report_dir.glob("trades_*.csv")):
+        try:
+            df = pd.read_csv(csv_path, parse_dates=["timestamp"])
+            for _, row in df.iterrows():
+                if str(row.get("side", "")).startswith("buy"):
+                    sym = row["symbol"]
+                    ts = pd.Timestamp(row["timestamp"]).tz_localize(None)
+                    if sym not in dates or ts > dates[sym]:
+                        dates[sym] = ts
+        except Exception:
+            pass
+    return dates
+
+
 def _generate_signals(model, symbols: list[str]) -> dict[str, float]:
     """Return {symbol: proba_up} for each symbol using predict_proba."""
     from pipeline.features import build_features_for_symbol
@@ -152,6 +191,8 @@ def rebalance(client, model, dry_run: bool = False) -> list[dict]:
     log.info("Open positions: %s", list(current_positions.keys()) or "none")
 
     signals = _generate_signals(model, UNIVERSE)
+    entry_dates = _entry_dates()
+    today = pd.Timestamp.now().normalize()
     trades = []
 
     # Check stop-losses on existing positions
@@ -174,11 +215,18 @@ def rebalance(client, model, dry_run: bool = False) -> list[dict]:
                 else:
                     log.info("  [DRY-RUN] Would close %s (stop-loss)", sym)
 
-    # Close positions where signal dropped below sell threshold
+    # Close positions past max hold period or below sell threshold
     for sym, pos in current_positions.items():
         proba = signals.get(sym, 0.0)
-        if proba < SELL_THRESHOLD:
-            log.info("Closing %s (proba=%.3f < %.2f)", sym, proba, SELL_THRESHOLD)
+        entry = entry_dates.get(sym)
+        days_held = (today - entry.normalize()).days if entry else 0
+        reason = None
+        if days_held >= MAX_HOLD_DAYS:
+            reason = f"max_hold ({days_held}d)"
+        elif proba < SELL_THRESHOLD:
+            reason = f"signal_fade (proba={proba:.3f})"
+        if reason:
+            log.info("Closing %s — %s", sym, reason)
             if not dry_run:
                 try:
                     client.close_position(sym)
@@ -193,16 +241,26 @@ def rebalance(client, model, dry_run: bool = False) -> list[dict]:
             else:
                 log.info("  [DRY-RUN] Would close %s", sym)
 
-    # Rank buy candidates by proba, cap at TOP_N
-    buy_candidates = sorted(
+    # Rank buy candidates by proba, apply sector cap, cap at TOP_N
+    all_candidates = sorted(
         [(sym, p) for sym, p in signals.items() if p > BUY_THRESHOLD],
-        key=lambda x: x[1],
-        reverse=True,
-    )[:TOP_N]
+        key=lambda x: x[1], reverse=True,
+    )
+    sector_counts: dict[str, int] = {}
+    buy_candidates: list[tuple[str, float]] = []
+    for sym, p in all_candidates:
+        if len(buy_candidates) >= TOP_N:
+            break
+        sector = _SYM_TO_SECTOR.get(sym, "Other")
+        if sector_counts.get(sector, 0) >= MAX_PER_SECTOR:
+            log.debug("  %s skipped — sector %s at cap (%d)", sym, sector, MAX_PER_SECTOR)
+            continue
+        buy_candidates.append((sym, p))
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+
     log.info(
-        "Buy candidates: %d above threshold, keeping top %d",
-        len([p for p in signals.values() if p > BUY_THRESHOLD]),
-        len(buy_candidates),
+        "Buy candidates: %d above threshold, %d after sector cap (max %d/sector), keeping top %d",
+        len(all_candidates), len(buy_candidates), MAX_PER_SECTOR, len(buy_candidates),
     )
 
     # Open positions for ranked buy signals

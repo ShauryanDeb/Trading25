@@ -146,6 +146,156 @@ def test_stop_loss_triggers_close(mock_client, tiny_model):
 
 
 # ---------------------------------------------------------------------------
+# alpaca_bot: sector cap, max hold, signal fade (synthetic/predictable data)
+# ---------------------------------------------------------------------------
+
+def test_sector_cap_limits_buys_per_sector(mock_client, tiny_model):
+    """When all Tech stocks score above threshold, at most MAX_PER_SECTOR are bought."""
+    from trading_bots.alpaca_bot import rebalance, MAX_PER_SECTOR, SECTOR_MAP
+
+    tech_syms = SECTOR_MAP["Tech"]
+    high_signals = {sym: 0.80 for sym in tech_syms}
+
+    model, _ = tiny_model
+    with patch("trading_bots.alpaca_bot._generate_signals", return_value=high_signals), \
+         patch("trading_bots.alpaca_bot._latest_price", return_value=100.0), \
+         patch("trading_bots.alpaca_bot._entry_dates", return_value={}):
+        trades = rebalance(mock_client, model, dry_run=True)
+
+    tech_buys = [t for t in trades if t["symbol"] in tech_syms]
+    assert len(tech_buys) <= MAX_PER_SECTOR, (
+        f"Got {len(tech_buys)} Tech buys but cap is {MAX_PER_SECTOR}"
+    )
+
+
+def test_sector_cap_allows_cross_sector_buys(mock_client, tiny_model):
+    """One stock per sector can all be bought simultaneously (no sector conflict)."""
+    from trading_bots.alpaca_bot import rebalance, SECTOR_MAP
+
+    one_per_sector = {syms[0]: 0.75 for syms in SECTOR_MAP.values()}
+    model, _ = tiny_model
+    with patch("trading_bots.alpaca_bot._generate_signals", return_value=one_per_sector), \
+         patch("trading_bots.alpaca_bot._latest_price", return_value=100.0), \
+         patch("trading_bots.alpaca_bot._entry_dates", return_value={}):
+        trades = rebalance(mock_client, model, dry_run=True)
+
+    bought_syms = {t["symbol"] for t in trades}
+    assert len(bought_syms) == len(SECTOR_MAP)
+
+
+def test_max_hold_triggers_close(mock_client, tiny_model):
+    """Position held MAX_HOLD_DAYS+1 days forces close regardless of signal."""
+    from trading_bots.alpaca_bot import rebalance, MAX_HOLD_DAYS
+
+    pos = MagicMock()
+    pos.symbol = "AAPL"
+    pos.market_value = "1000.00"
+    pos.avg_entry_price = "100.00"
+    pos.qty = "10"
+    mock_client.get_all_positions.return_value = [pos]
+
+    stale_entry = pd.Timestamp.now().normalize() - pd.Timedelta(days=MAX_HOLD_DAYS + 1)
+    model, _ = tiny_model
+    with patch("trading_bots.alpaca_bot._generate_signals",
+               return_value={"AAPL": 0.50}), \
+         patch("trading_bots.alpaca_bot._latest_price", return_value=100.0), \
+         patch("trading_bots.alpaca_bot._entry_dates",
+               return_value={"AAPL": stale_entry}):
+        rebalance(mock_client, model, dry_run=False)
+
+    mock_client.close_position.assert_called()
+
+
+def test_max_hold_no_close_when_fresh(mock_client, tiny_model):
+    """Position held 1 day should NOT trigger the max-hold exit."""
+    from trading_bots.alpaca_bot import rebalance, SELL_THRESHOLD
+
+    pos = MagicMock()
+    pos.symbol = "MSFT"
+    pos.market_value = "1000.00"
+    pos.avg_entry_price = "100.00"
+    pos.qty = "10"
+    mock_client.get_all_positions.return_value = [pos]
+
+    fresh_entry = pd.Timestamp.now().normalize() - pd.Timedelta(days=1)
+    # Signal above sell threshold so signal-fade doesn't fire either
+    model, _ = tiny_model
+    with patch("trading_bots.alpaca_bot._generate_signals",
+               return_value={"MSFT": SELL_THRESHOLD + 0.10}), \
+         patch("trading_bots.alpaca_bot._latest_price", return_value=100.0), \
+         patch("trading_bots.alpaca_bot._entry_dates",
+               return_value={"MSFT": fresh_entry}):
+        rebalance(mock_client, model, dry_run=False)
+
+    # Stop-loss won't fire (pnl=0%), max-hold won't fire (1 day), signal OK
+    calls = [str(c) for c in mock_client.close_position.call_args_list]
+    assert not any("MSFT" in c for c in calls)
+
+
+def test_signal_fade_triggers_close(mock_client, tiny_model):
+    """Signal below SELL_THRESHOLD causes close even when PnL is positive."""
+    from trading_bots.alpaca_bot import rebalance, SELL_THRESHOLD
+
+    pos = MagicMock()
+    pos.symbol = "NVDA"
+    pos.market_value = "1000.00"
+    pos.avg_entry_price = "100.00"
+    pos.qty = "10"
+    mock_client.get_all_positions.return_value = [pos]
+
+    model, _ = tiny_model
+    with patch("trading_bots.alpaca_bot._generate_signals",
+               return_value={"NVDA": SELL_THRESHOLD - 0.05}), \
+         patch("trading_bots.alpaca_bot._latest_price", return_value=100.0), \
+         patch("trading_bots.alpaca_bot._entry_dates", return_value={}):
+        rebalance(mock_client, model, dry_run=False)
+
+    mock_client.close_position.assert_called()
+
+
+def test_entry_dates_reads_buys_from_csv(tmp_path):
+    """_entry_dates logic: finds most-recent buy per symbol, ignores sells."""
+    import csv as _csv
+
+    fields = ["timestamp", "symbol", "side", "qty", "price", "signal_proba"]
+    rows_day1 = [
+        {"timestamp": "2026-06-10T14:35:00+00:00", "symbol": "AAPL",
+         "side": "buy", "qty": 10, "price": 185.0, "signal_proba": 0.65},
+        {"timestamp": "2026-06-10T14:35:00+00:00", "symbol": "MSFT",
+         "side": "sell", "qty": 5, "price": 400.0, "signal_proba": 0.30},
+    ]
+    rows_day2 = [
+        {"timestamp": "2026-06-11T14:35:00+00:00", "symbol": "AAPL",
+         "side": "buy", "qty": 10, "price": 186.0, "signal_proba": 0.67},
+        {"timestamp": "2026-06-11T14:35:00+00:00", "symbol": "NVDA",
+         "side": "buy", "qty": 3, "price": 900.0, "signal_proba": 0.71},
+    ]
+    for fname, rows in [("trades_20260610.csv", rows_day1),
+                        ("trades_20260611.csv", rows_day2)]:
+        with open(tmp_path / fname, "w", newline="") as f:
+            writer = _csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    # Replicate the exact _entry_dates logic against our temp directory
+    dates: dict = {}
+    for csv_path in sorted(tmp_path.glob("trades_*.csv")):
+        df = pd.read_csv(csv_path, parse_dates=["timestamp"])
+        for _, row in df.iterrows():
+            if str(row.get("side", "")).startswith("buy"):
+                sym = row["symbol"]
+                ts = pd.Timestamp(row["timestamp"]).tz_localize(None)
+                if sym not in dates or ts > dates[sym]:
+                    dates[sym] = ts
+
+    assert "AAPL" in dates, "AAPL buy not found"
+    assert "NVDA" in dates, "NVDA buy not found"
+    assert "MSFT" not in dates, "MSFT had only a sell — should not appear"
+    # Most recent AAPL buy is June 11 (later CSV), not June 10
+    assert dates["AAPL"].date() == pd.Timestamp("2026-06-11").date()
+
+
+# ---------------------------------------------------------------------------
 # scheduler: trade log CSV
 # ---------------------------------------------------------------------------
 

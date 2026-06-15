@@ -35,6 +35,12 @@ FEATURE_COLS = [
     # Macro
     "VIX",
     "TNX",
+    # SPY-relative (market context + alpha signal)
+    "SPY_Return_1d",
+    "SPY_Return_5d",
+    "SPY_Return_20d",
+    "Rel_Return_1d",
+    "Rel_Return_5d",
 ]
 
 LABEL_COL = "Target"
@@ -70,10 +76,15 @@ def _obv(df: pd.DataFrame) -> pd.Series:
 # ---------------------------------------------------------------------------
 
 def _fetch_macro(start: str, end: str) -> pd.DataFrame:
-    """Return daily VIX and 10-yr yield (TNX), forward-filled."""
+    """Return daily VIX, 10-yr yield (TNX), and SPY returns, forward-filled."""
     vix = fetch("^VIX", start=start, end=end)[["Close"]].rename(columns={"Close": "VIX"})
     tnx = fetch("^TNX", start=start, end=end)[["Close"]].rename(columns={"Close": "TNX"})
-    macro = vix.join(tnx, how="outer").ffill()
+    spy = fetch("SPY", start=start, end=end)[["Close"]]
+    spy["SPY_Return_1d"] = spy["Close"].pct_change(1)
+    spy["SPY_Return_5d"] = spy["Close"].pct_change(5)
+    spy["SPY_Return_20d"] = spy["Close"].pct_change(20)
+    spy = spy[["SPY_Return_1d", "SPY_Return_5d", "SPY_Return_20d"]]
+    macro = vix.join(tnx, how="outer").join(spy, how="outer").ffill()
     return macro
 
 
@@ -140,16 +151,26 @@ def build_features(
     obv = _obv(out)
     out["OBV_Change"] = obv.pct_change(5)
 
-    # Macro
+    # Macro + SPY context
+    macro_cols = ["VIX", "TNX", "SPY_Return_1d", "SPY_Return_5d", "SPY_Return_20d"]
     if macro is not None:
-        out = out.join(macro[["VIX", "TNX"]], how="left")
-        out[["VIX", "TNX"]] = out[["VIX", "TNX"]].ffill()
+        available = [c for c in macro_cols if c in macro.columns]
+        out = out.join(macro[available], how="left")
+        out[available] = out[available].ffill()
     else:
-        out["VIX"] = np.nan
-        out["TNX"] = np.nan
+        for c in macro_cols:
+            out[c] = np.nan
 
-    # Target: 1 if next-day return > 0 else 0
-    out[LABEL_COL] = (out["Close"].shift(-1) > out["Close"]).astype(int)
+    # SPY-relative momentum features (capture alpha vs market)
+    out["Rel_Return_1d"] = out["Return_1d"] - out["SPY_Return_1d"]
+    out["Rel_Return_5d"] = out["Return_5d"] - out["SPY_Return_5d"]
+
+    # Target: 1 if stock outperforms SPY by >0.3% over the next 5 trading days.
+    # This removes market-beta noise so the model learns relative strength,
+    # not just whether the whole market went up.
+    stock_5d = out["Close"].shift(-5) / out["Close"] - 1
+    spy_5d = out["SPY_Return_5d"].shift(-5)
+    out[LABEL_COL] = ((stock_5d - spy_5d) > 0.003).astype(int)
 
     out = out[FEATURE_COLS + [LABEL_COL]].dropna()
     return out

@@ -114,8 +114,11 @@ def build_intraday_features(df: pd.DataFrame) -> pd.DataFrame:
     out["ROC_3"] = out["Close"].pct_change(3)
     out["ROC_6"] = out["Close"].pct_change(6)
 
-    # Target: 1 if next bar close > current close
-    out[INTRADAY_LABEL_COL] = (out["Close"].shift(-1) > out["Close"]).astype(int)
+    # Target: 1 if price rises >=0.20% over the next 6 bars (~30 min).
+    # Single-bar direction is near-random noise; a 30-min horizon with a
+    # minimum threshold gives the model a learnable, actionable signal.
+    fwd_ret = out["Close"].shift(-6) / out["Close"] - 1
+    out[INTRADAY_LABEL_COL] = (fwd_ret > 0.002).astype(int)
 
     out = out[INTRADAY_FEATURE_COLS + [INTRADAY_LABEL_COL]].dropna()
     return out

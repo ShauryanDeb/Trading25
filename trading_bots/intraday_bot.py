@@ -59,9 +59,15 @@ UNIVERSE = [
     "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "MPC", "VLO", "PSX", "DVN",
 ]
 
-BUY_THRESHOLD = 0.60      # tighter than daily — intraday is noisier
-PROFIT_TARGET = 0.0075    # +0.75% exit
-STOP_LOSS = -0.0035       # -0.35% exit
+BUY_THRESHOLD = 0.30      # calibrated model with 30-min/0.20% label: signals peak ~0.32
+# ATR-based exits: profit target = ATR_MULT_TARGET * ATR / price,
+#                  stop-loss    = ATR_MULT_STOP    * ATR / price
+ATR_MULT_TARGET = 2.0     # take profit at 2x the 14-bar ATR
+ATR_MULT_STOP = 1.0       # cut loss at 1x the 14-bar ATR
+VIX_MAX = 25.0            # suspend trading when VIX exceeds this level
+MIN_HOLD_BARS = 2         # don't check exits until 2 ticks (~10 min) after entry
+ENTRY_START_HOUR = 10     # only open new positions after 10:00 AM ET
+ENTRY_END_HOUR = 15       # stop opening new positions at 3:00 PM ET
 MAX_POSITIONS = 10        # max concurrent holdings
 POSITION_PCT = 0.03       # 3% of portfolio per position
 HARD_CLOSE_HOUR = 15      # 3 PM ET
@@ -79,6 +85,35 @@ def _get_client():
     if not key or not secret:
         raise EnvironmentError("APCA_API_KEY_ID_INTRADAY / APCA_API_SECRET_KEY_INTRADAY not set in .env")
     return TradingClient(key, secret, paper=True)
+
+
+def _get_data_client():
+    from alpaca.data.historical import StockHistoricalDataClient
+    key = os.environ.get("APCA_API_KEY_ID_INTRADAY")
+    secret = os.environ.get("APCA_API_SECRET_KEY_INTRADAY")
+    return StockHistoricalDataClient(key, secret)
+
+
+def _current_vix() -> float:
+    """Return latest VIX close via yfinance."""
+    try:
+        import yfinance as yf
+        hist = yf.Ticker("^VIX").history(period="2d")
+        return float(hist["Close"].iloc[-1])
+    except Exception:
+        return 0.0
+
+
+def _live_ask(data_client, symbol: str) -> float | None:
+    """Return current ask price from Alpaca real-time quote."""
+    try:
+        from alpaca.data.requests import StockLatestQuoteRequest
+        req = StockLatestQuoteRequest(symbol_or_symbols=symbol)
+        quote = data_client.get_stock_latest_quote(req)
+        ask = float(quote[symbol].ask_price)
+        return ask if ask > 0 else None
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -102,10 +137,14 @@ def _log_trade(trade: dict) -> None:
 # Signal generation
 # ---------------------------------------------------------------------------
 
-def _score_symbol(model, symbol: str) -> float | None:
-    """Return proba_up for a single symbol using latest 5-min bars."""
+def _score_symbol(model, symbol: str) -> tuple[float, float] | None:
+    """Return (proba_up, atr) for a single symbol using latest 5-min bars.
+
+    ATR is the raw 14-bar average true range in dollars, used for exit sizing.
+    Returns None if data is insufficient.
+    """
     from pipeline.intraday_data import fetch_latest_bars
-    from pipeline.intraday_features import build_intraday_features
+    from pipeline.intraday_features import build_intraday_features, _atr
 
     try:
         bars = fetch_latest_bars(symbol, n=60)
@@ -115,7 +154,9 @@ def _score_symbol(model, symbol: str) -> float | None:
         if feats.empty:
             return None
         latest = feats.iloc[[-1]]
-        return float(model.predict_proba(latest)[0][1])
+        proba = float(model.predict_proba(latest)[0][1])
+        atr = float(latest["ATR_14"].iloc[0]) if "ATR_14" in latest.columns else 0.0
+        return proba, atr
     except Exception as e:
         log.debug("  %s score failed: %s", symbol, e)
         return None
@@ -137,20 +178,34 @@ def _get_positions(client) -> dict[str, dict]:
     return result
 
 
-def _check_exits(client, positions: dict, dry_run: bool) -> None:
-    """Check profit target and stop-loss on all open positions."""
+def _check_exits(client, positions: dict, dry_run: bool,
+                 stopped_out: set | None = None) -> set:
+    """Check ATR-scaled profit target and stop-loss on eligible positions.
+
+    Returns set of symbols that hit stop-loss (to add to session cooldown).
+    """
     from alpaca.trading.enums import OrderSide, TimeInForce
     from alpaca.trading.requests import MarketOrderRequest
 
+    newly_stopped: set[str] = set()
     for sym, pos in positions.items():
         entry = pos["avg_entry_price"]
         price = pos["current_price"]
         pnl_pct = (price - entry) / entry
 
+        # ATR-based dynamic targets: scale by each stock's volatility
+        atr = pos.get("entry_atr", 0.0)
+        if atr > 0 and entry > 0:
+            profit_target = ATR_MULT_TARGET * atr / entry
+            stop_loss = -ATR_MULT_STOP * atr / entry
+        else:
+            profit_target = 0.0075   # fallback fixed values
+            stop_loss = -0.0060
+
         reason = None
-        if pnl_pct >= PROFIT_TARGET:
+        if pnl_pct >= profit_target:
             reason = "profit_target"
-        elif pnl_pct <= STOP_LOSS:
+        elif pnl_pct <= stop_loss:
             reason = "stop_loss"
 
         if reason:
@@ -164,10 +219,14 @@ def _check_exits(client, positions: dict, dry_run: bool) -> None:
                         "price": price, "signal_proba": "", "pnl_pct": f"{pnl_pct:.4f}",
                         "exit_reason": reason,
                     })
+                    if reason == "stop_loss":
+                        newly_stopped.add(sym)
+                        log.info("  %s cooled off for rest of session", sym)
                 except Exception as e:
                     log.warning("  Close failed for %s: %s", sym, e)
             else:
                 log.info("  [DRY-RUN] Would close %s (%s)", sym, reason)
+    return newly_stopped
 
 
 def _hard_close_all(client, positions: dict, dry_run: bool) -> None:
@@ -206,6 +265,14 @@ def run_session(dry_run: bool = False) -> None:
     log.info("Loading intraday model from %s", MODEL_PATH)
     model = IntradayEnsemble.load(MODEL_PATH)
     client = _get_client()
+    data_client = _get_data_client()
+
+    # VIX regime check — suspend session if volatility is too high
+    vix = _current_vix()
+    if vix > VIX_MAX:
+        log.warning("VIX=%.1f > %.0f — high-volatility regime, session suspended", vix, VIX_MAX)
+        return
+    log.info("VIX=%.1f — within normal range, proceeding", vix)
 
     account = client.get_account()
     portfolio_value = float(account.portfolio_value)
@@ -213,6 +280,10 @@ def run_session(dry_run: bool = False) -> None:
              portfolio_value, float(account.buying_power))
 
     max_alloc = portfolio_value * POSITION_PCT
+    stopped_out: set[str] = set()    # symbols cooled-off after a stop-loss this session
+    entry_tick: dict[str, int] = {}  # symbol -> tick count at entry (for min hold)
+    entry_atr: dict[str, float] = {} # symbol -> ATR at time of entry (for exit sizing)
+    tick = 0
 
     while True:
         now = datetime.now(tz=ET)
@@ -233,36 +304,41 @@ def run_session(dry_run: bool = False) -> None:
 
         # --- Every 5-minute tick ---
         log.info("--- Tick %s ---", now.strftime("%H:%M"))
+        tick += 1
 
-        # Check exits on open positions first
+        # Check exits on open positions — but respect MIN_HOLD_BARS
         positions = _get_positions(client)
+        # Attach stored ATR so _check_exits can compute dynamic targets
+        for sym in positions:
+            positions[sym]["entry_atr"] = entry_atr.get(sym, 0.0)
         if positions:
-            _check_exits(client, positions, dry_run)
+            eligible = {s: p for s, p in positions.items()
+                        if tick - entry_tick.get(s, 0) >= MIN_HOLD_BARS}
+            if eligible:
+                exited = _check_exits(client, eligible, dry_run, stopped_out)
+                stopped_out.update(exited)
             positions = _get_positions(client)  # refresh after exits
 
-        # Score universe for new entries
-        if len(positions) < MAX_POSITIONS:
+        # Only open new positions within the allowed time window
+        entry_allowed = ENTRY_START_HOUR <= now.hour < ENTRY_END_HOUR
+        if len(positions) < MAX_POSITIONS and entry_allowed:
             slots = MAX_POSITIONS - len(positions)
             candidates = []
             for sym in UNIVERSE:
-                if sym in positions:
+                if sym in positions or sym in stopped_out:
                     continue
-                proba = _score_symbol(model, sym)
-                if proba is not None:
-                    log.debug("  %s  proba=%.3f", sym, proba)
+                result = _score_symbol(model, sym)
+                if result is not None:
+                    proba, atr = result
+                    log.debug("  %s  proba=%.3f  atr=%.4f", sym, proba, atr)
                     if proba > BUY_THRESHOLD:
-                        candidates.append((sym, proba))
+                        candidates.append((sym, proba, atr))
 
             # Rank by proba, take top available slots
             candidates.sort(key=lambda x: x[1], reverse=True)
-            for sym, proba in candidates[:slots]:
-                try:
-                    from pipeline.intraday_data import fetch_latest_bars
-                    bars = fetch_latest_bars(sym, n=2)
-                    price = float(bars["Close"].iloc[-1]) if not bars.empty else None
-                except Exception:
-                    price = None
-
+            for sym, proba, atr in candidates[:slots]:
+                # Use live ask price for accurate entry cost
+                price = _live_ask(data_client, sym)
                 if not price or price <= 0:
                     continue
 
@@ -270,7 +346,7 @@ def run_session(dry_run: bool = False) -> None:
                 if qty < 1:
                     continue
 
-                log.info("BUY %d x %s @ ~$%.2f  proba=%.3f", qty, sym, price, proba)
+                log.info("BUY %d x %s @ ask $%.2f  proba=%.3f  atr=%.4f", qty, sym, price, proba, atr)
                 if not dry_run:
                     try:
                         order = MarketOrderRequest(
@@ -280,6 +356,8 @@ def run_session(dry_run: bool = False) -> None:
                             time_in_force=TimeInForce.DAY,
                         )
                         client.submit_order(order)
+                        entry_tick[sym] = tick
+                        entry_atr[sym] = atr
                         _log_trade({
                             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                             "symbol": sym, "side": "buy", "qty": qty,
@@ -290,6 +368,9 @@ def run_session(dry_run: bool = False) -> None:
                         log.warning("  Order failed for %s: %s", sym, e)
                 else:
                     log.info("  [DRY-RUN] Would buy %d x %s", qty, sym)
+        elif not entry_allowed:
+            log.info("Outside entry window (%d:00–%d:00 ET) — monitoring exits only",
+                     ENTRY_START_HOUR, ENTRY_END_HOUR)
         else:
             log.info("Max positions (%d) reached — monitoring exits only", MAX_POSITIONS)
 
