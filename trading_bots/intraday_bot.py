@@ -443,7 +443,7 @@ def train_model(symbols: list[str] | None = None, days_back: int = 90) -> None:
         log.error("No data fetched — aborting training")
         return
 
-    combined = pd.concat(frames, ignore_index=True).sample(frac=1, random_state=42)
+    combined = pd.concat(frames).sort_index().reset_index(drop=True)
     X = combined.drop(columns=["Target"])
     y = combined["Target"]
     log.info("Training on %d samples from %d symbols, %d features", len(combined), len(frames), X.shape[1])

@@ -378,3 +378,64 @@ def test_intraday_constants_reasonable():
     assert MAX_POSITIONS * POSITION_PCT <= 1.0, (
         "MAX_POSITIONS * POSITION_PCT > 100%: would require more than full capital"
     )
+
+
+# ---------------------------------------------------------------------------
+# _spy_trending_down: market-direction filter
+# ---------------------------------------------------------------------------
+
+def _make_spy_bars(closes: list[float]) -> pd.DataFrame:
+    """Build a minimal SPY bar DataFrame from a list of close prices."""
+    idx = pd.date_range("2026-06-18 09:30", periods=len(closes), freq="5min", tz="UTC")
+    return pd.DataFrame({"Close": closes}, index=idx)
+
+
+def test_spy_trending_down_detects_streak():
+    """Returns True when the last SPY_BARS_DOWN bars all close lower."""
+    from trading_bots.intraday_bot import _spy_trending_down, SPY_BARS_DOWN
+
+    # Build SPY_BARS_DOWN+2 bars where the last SPY_BARS_DOWN are each lower
+    closes = [100.0, 100.5] + [100.0 - i * 0.1 for i in range(SPY_BARS_DOWN)]
+    bars = _make_spy_bars(closes)
+
+    with patch("pipeline.intraday_data.fetch_latest_bars", return_value=bars):
+        result = _spy_trending_down()
+
+    assert result is True, "Should detect consecutive down streak"
+
+
+def test_spy_trending_down_false_on_mixed_bars():
+    """Returns False when the streak is interrupted by one up bar."""
+    from trading_bots.intraday_bot import _spy_trending_down, SPY_BARS_DOWN
+
+    # Last bar is up, breaking the streak
+    closes = [100.0, 99.8, 99.6, 99.4, 99.6]  # final bar rises
+    bars = _make_spy_bars(closes)
+
+    with patch("pipeline.intraday_data.fetch_latest_bars", return_value=bars):
+        result = _spy_trending_down()
+
+    assert result is False, "Interrupted streak should not block entries"
+
+
+def test_spy_trending_down_false_on_insufficient_bars():
+    """Returns False (safe default) when fewer bars are available than needed."""
+    from trading_bots.intraday_bot import _spy_trending_down, SPY_BARS_DOWN
+
+    # Only 2 bars — not enough to evaluate a SPY_BARS_DOWN streak
+    bars = _make_spy_bars([100.0, 99.0])
+
+    with patch("pipeline.intraday_data.fetch_latest_bars", return_value=bars):
+        result = _spy_trending_down()
+
+    assert result is False, "Insufficient bars → safe default (don't block entries)"
+
+
+def test_spy_trending_down_false_on_fetch_error():
+    """Returns False when fetch_latest_bars raises — never block on data errors."""
+    from trading_bots.intraday_bot import _spy_trending_down
+
+    with patch("pipeline.intraday_data.fetch_latest_bars", side_effect=RuntimeError("no data")):
+        result = _spy_trending_down()
+
+    assert result is False, "Exception in SPY fetch must not block trading"
