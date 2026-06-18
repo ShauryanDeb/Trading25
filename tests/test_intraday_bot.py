@@ -129,13 +129,13 @@ def test_atr_exit_dry_run_never_closes():
     client.close_position.assert_not_called()
 
 
-def test_atr_fallback_fixed_targets_profit():
-    """When entry_atr=0, fallback profit target of 0.75% applies."""
-    from trading_bots.intraday_bot import _check_exits
+def test_atr_fallback_uses_floor_profit():
+    """When entry_atr=0, MIN_TARGET_PCT floor applies as profit target."""
+    from trading_bots.intraday_bot import _check_exits, MIN_TARGET_PCT
 
     client = MagicMock()
-    # +0.8% is above the fallback profit target of 0.75%
-    positions = _make_position("INTC", 100.0, 100.8, atr=0.0)
+    # +1.3% exceeds the MIN_TARGET_PCT floor → profit target fires
+    positions = _make_position("INTC", 100.0, 100.0 * (1 + MIN_TARGET_PCT + 0.001), atr=0.0)
 
     with patch("trading_bots.intraday_bot._log_trade"):
         stopped = _check_exits(client, positions, dry_run=False)
@@ -144,13 +144,24 @@ def test_atr_fallback_fixed_targets_profit():
     assert "INTC" not in stopped
 
 
-def test_atr_fallback_fixed_targets_stop():
-    """When entry_atr=0, fallback stop of -0.60% applies."""
-    from trading_bots.intraday_bot import _check_exits
+def test_atr_fallback_no_exit_below_floor():
+    """Price just below MIN_TARGET_PCT must NOT trigger exit (floor protects it)."""
+    from trading_bots.intraday_bot import _check_exits, MIN_TARGET_PCT, MIN_STOP_PCT
 
     client = MagicMock()
-    # -0.7% is below the fallback stop of -0.60%
-    positions = _make_position("QCOM", 100.0, 99.3, atr=0.0)
+    # Price between -MIN_STOP_PCT and +MIN_TARGET_PCT → inside band, no exit
+    positions = _make_position("INTC", 100.0, 100.0 * (1 + MIN_TARGET_PCT * 0.5), atr=0.0)
+    _check_exits(client, positions, dry_run=False)
+    client.close_position.assert_not_called()
+
+
+def test_atr_fallback_uses_floor_stop():
+    """When entry_atr=0, MIN_STOP_PCT floor applies as stop-loss."""
+    from trading_bots.intraday_bot import _check_exits, MIN_STOP_PCT
+
+    client = MagicMock()
+    # -0.7% exceeds MIN_STOP_PCT (0.6%) → stop fires
+    positions = _make_position("QCOM", 100.0, 100.0 * (1 - MIN_STOP_PCT - 0.001), atr=0.0)
 
     with patch("trading_bots.intraday_bot._log_trade"):
         stopped = _check_exits(client, positions, dry_run=False)
@@ -161,21 +172,21 @@ def test_atr_fallback_fixed_targets_stop():
 
 def test_atr_exit_scales_with_volatility():
     """Higher ATR → wider exit bands; low-ATR position exits, high-ATR doesn't."""
-    from trading_bots.intraday_bot import _check_exits
+    from trading_bots.intraday_bot import _check_exits, MIN_STOP_PCT
 
     entry = 100.0
-    move = -1.5  # -1.5% from entry
-
-    # Low ATR ($0.50): stop = -0.5% → -1.5% triggers stop
+    # Low-ATR stock: raw stop = $0.50/$100 = 0.5%, but floor raises to MIN_STOP_PCT (0.6%).
+    # -1.5% clearly exceeds the 0.6% floor → stop fires.
     client_low = MagicMock()
-    positions_low = _make_position("LOW_VOL", entry, entry + move, atr=0.50)
+    positions_low = _make_position("LOW_VOL", entry, entry * 0.985, atr=0.50)
     with patch("trading_bots.intraday_bot._log_trade"):
-        stopped_low = _check_exits(client_low, positions_low, dry_run=False)
+        _check_exits(client_low, positions_low, dry_run=False)
     assert client_low.close_position.called, "Low-ATR stock should be stopped out at -1.5%"
 
-    # High ATR ($3.00): stop = -3% → -1.5% does NOT trigger stop
+    # High-ATR stock: raw stop = $3.00/$100 = 3%.
+    # -1.5% is inside the 3% band → does NOT trigger.
     client_high = MagicMock()
-    positions_high = _make_position("HIGH_VOL", entry, entry + move, atr=3.00)
+    positions_high = _make_position("HIGH_VOL", entry, entry * 0.985, atr=3.00)
     _check_exits(client_high, positions_high, dry_run=False)
     assert not client_high.close_position.called, "High-ATR stock should survive -1.5%"
 

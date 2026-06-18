@@ -80,9 +80,9 @@ def _fetch_macro(start: str, end: str) -> pd.DataFrame:
     vix = fetch("^VIX", start=start, end=end)[["Close"]].rename(columns={"Close": "VIX"})
     tnx = fetch("^TNX", start=start, end=end)[["Close"]].rename(columns={"Close": "TNX"})
     spy = fetch("SPY", start=start, end=end)[["Close"]]
-    spy["SPY_Return_1d"] = spy["Close"].pct_change(1)
-    spy["SPY_Return_5d"] = spy["Close"].pct_change(5)
-    spy["SPY_Return_20d"] = spy["Close"].pct_change(20)
+    spy["SPY_Return_1d"] = spy["Close"].pct_change(1, fill_method=None)
+    spy["SPY_Return_5d"] = spy["Close"].pct_change(5, fill_method=None)
+    spy["SPY_Return_20d"] = spy["Close"].pct_change(20, fill_method=None)
     spy = spy[["SPY_Return_1d", "SPY_Return_5d", "SPY_Return_20d"]]
     macro = vix.join(tnx, how="outer").join(spy, how="outer").ffill()
     return macro
@@ -109,9 +109,9 @@ def build_features(
     out = df.copy()
 
     # Returns
-    out["Return_1d"] = out["Close"].pct_change(1)
-    out["Return_5d"] = out["Close"].pct_change(5)
-    out["Return_20d"] = out["Close"].pct_change(20)
+    out["Return_1d"] = out["Close"].pct_change(1, fill_method=None)
+    out["Return_5d"] = out["Close"].pct_change(5, fill_method=None)
+    out["Return_20d"] = out["Close"].pct_change(20, fill_method=None)
 
     # Moving averages
     out["MA_20"] = out["Close"].rolling(20).mean()

@@ -64,6 +64,11 @@ BUY_THRESHOLD = 0.30      # calibrated model with 30-min/0.20% label: signals pe
 #                  stop-loss    = ATR_MULT_STOP    * ATR / price
 ATR_MULT_TARGET = 2.0     # take profit at 2x the 14-bar ATR
 ATR_MULT_STOP = 1.0       # cut loss at 1x the 14-bar ATR
+# Floor stops prevent getting clipped by bid-ask spread on low-volatility large-caps.
+# 5-min ATR for stocks like BAC/NKE is ~$0.05-$0.15, giving stops of 0.1-0.3% —
+# smaller than the spread itself. Floor of 0.6% keeps stops outside noise.
+MIN_STOP_PCT = 0.006      # never stop out on less than 0.6% adverse move
+MIN_TARGET_PCT = 0.012    # never take profit on less than 1.2% gain (maintains 2:1 R/R)
 VIX_MAX = 25.0            # suspend trading when VIX exceeds this level
 MIN_HOLD_BARS = 2         # don't check exits until 2 ticks (~10 min) after entry
 ENTRY_START_HOUR = 10     # only open new positions after 10:00 AM ET
@@ -72,6 +77,7 @@ MAX_POSITIONS = 10        # max concurrent holdings
 POSITION_PCT = 0.03       # 3% of portfolio per position
 HARD_CLOSE_HOUR = 15      # 3 PM ET
 HARD_CLOSE_MINUTE = 55    # 3:55 PM ET
+SPY_BARS_DOWN = 3         # number of consecutive negative SPY 5-min bars that block new entries
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +120,30 @@ def _live_ask(data_client, symbol: str) -> float | None:
         return ask if ask > 0 else None
     except Exception:
         return None
+
+
+def _spy_trending_down() -> bool:
+    """Return True if the last SPY_BARS_DOWN 5-min bars all closed lower than the prior bar.
+
+    A streak of consecutive down bars means the broad market is in an intraday
+    downtrend. Opening new long positions into that tape results in systematic
+    stop-outs — blocking entries during these streaks avoids buying falling knives.
+    Returns False (allow entries) on any data error so the bot degrades gracefully.
+    """
+    try:
+        from pipeline.intraday_data import fetch_latest_bars
+        bars = fetch_latest_bars("SPY", n=SPY_BARS_DOWN + 2)
+        if len(bars) < SPY_BARS_DOWN + 1:
+            return False
+        closes = bars["Close"].iloc[-(SPY_BARS_DOWN + 1):]
+        changes = closes.diff().dropna()
+        down_streak = all(c < 0 for c in changes.iloc[-SPY_BARS_DOWN:])
+        if down_streak:
+            log.info("SPY down %d consecutive bars — blocking new entries", SPY_BARS_DOWN)
+        return down_streak
+    except Exception as e:
+        log.debug("SPY direction check failed: %s", e)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -193,14 +223,16 @@ def _check_exits(client, positions: dict, dry_run: bool,
         price = pos["current_price"]
         pnl_pct = (price - entry) / entry
 
-        # ATR-based dynamic targets: scale by each stock's volatility
+        # ATR-based dynamic targets: scale by each stock's volatility.
+        # Floor prevents stops smaller than the bid-ask spread on low-vol large-caps
+        # (e.g. BAC 5-min ATR ~$0.05 → raw stop -0.09%, inside the spread).
         atr = pos.get("entry_atr", 0.0)
         if atr > 0 and entry > 0:
-            profit_target = ATR_MULT_TARGET * atr / entry
-            stop_loss = -ATR_MULT_STOP * atr / entry
+            profit_target = max(ATR_MULT_TARGET * atr / entry, MIN_TARGET_PCT)
+            stop_loss = -max(ATR_MULT_STOP * atr / entry, MIN_STOP_PCT)
         else:
-            profit_target = 0.0075   # fallback fixed values
-            stop_loss = -0.0060
+            profit_target = MIN_TARGET_PCT
+            stop_loss = -MIN_STOP_PCT
 
         reason = None
         if pnl_pct >= profit_target:
@@ -322,6 +354,14 @@ def run_session(dry_run: bool = False) -> None:
         # Only open new positions within the allowed time window
         entry_allowed = ENTRY_START_HOUR <= now.hour < ENTRY_END_HOUR
         if len(positions) < MAX_POSITIONS and entry_allowed:
+            # Block new longs when the broad market is in an intraday downtrend.
+            # Entering positions into a falling tape produces systematic stop-outs
+            # because the ATR-based stops can't distinguish signal from market drift.
+            if _spy_trending_down():
+                log.info("SPY downtrend — skipping new entries this tick")
+                time.sleep(300)
+                continue
+
             slots = MAX_POSITIONS - len(positions)
             candidates = []
             for sym in UNIVERSE:

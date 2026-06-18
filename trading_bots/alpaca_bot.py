@@ -64,7 +64,8 @@ UNIVERSE = [
 MAX_POSITION_PCT = 0.05   # 5% of portfolio per symbol
 TOP_N = 20                # max positions held at once (rank-and-cap)
 MAX_PER_SECTOR = 3        # max concurrent positions within one GICS sector
-MAX_HOLD_DAYS = 5         # force-exit after 5 trading days regardless of signal
+MAX_HOLD_DAYS = 3         # force-exit after 3 calendar days — limits exposure to
+                          # correlated sector drawdowns that the signal doesn't catch
 BUY_THRESHOLD = 0.40      # predict_proba > this => BUY candidate
 SELL_THRESHOLD = 0.36     # predict_proba < this => SELL/SKIP
 STOP_LOSS_PCT = -0.07     # -7% from entry => stop-loss
