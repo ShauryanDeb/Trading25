@@ -431,6 +431,61 @@ def test_spy_trending_down_false_on_insufficient_bars():
     assert result is False, "Insufficient bars → safe default (don't block entries)"
 
 
+# ---------------------------------------------------------------------------
+# Market-open guard: session skips entirely when market is closed
+# ---------------------------------------------------------------------------
+
+def test_run_session_skips_when_market_closed(tiny_intraday_model):
+    """run_session returns immediately without touching orders on a closed market."""
+    from trading_bots.intraday_bot import run_session
+    from pipeline.intraday_model import IntradayEnsemble
+
+    mock_client = MagicMock()
+    clock = MagicMock()
+    clock.is_open = False
+    mock_client.get_clock.return_value = clock
+
+    _, model_path = tiny_intraday_model
+
+    with patch("trading_bots.intraday_bot._get_client", return_value=mock_client), \
+         patch("trading_bots.intraday_bot._get_data_client", return_value=MagicMock()), \
+         patch("trading_bots.intraday_bot._current_vix", return_value=15.0), \
+         patch("trading_bots.intraday_bot.MODEL_PATH", model_path), \
+         patch("pipeline.intraday_model.IntradayEnsemble.load",
+               return_value=tiny_intraday_model[0]):
+        run_session(dry_run=True)
+
+    mock_client.get_account.assert_not_called()
+    mock_client.submit_order.assert_not_called()
+
+
+def test_run_session_proceeds_when_market_open(tiny_intraday_model, mock_intraday_client):
+    """run_session proceeds past the market-open check when clock.is_open=True."""
+    from trading_bots.intraday_bot import run_session
+    from zoneinfo import ZoneInfo
+
+    ET = ZoneInfo("America/New_York")
+    _, model_path = tiny_intraday_model
+
+    clock = MagicMock()
+    clock.is_open = True
+    mock_intraday_client.get_clock.return_value = clock
+
+    fake_now = pd.Timestamp("2026-06-20 15:56:00", tz=ET)
+
+    with patch("trading_bots.intraday_bot._get_client", return_value=mock_intraday_client), \
+         patch("trading_bots.intraday_bot._get_data_client", return_value=MagicMock()), \
+         patch("trading_bots.intraday_bot._current_vix", return_value=15.0), \
+         patch("trading_bots.intraday_bot.MODEL_PATH", model_path), \
+         patch("pipeline.intraday_model.IntradayEnsemble.load",
+               return_value=tiny_intraday_model[0]), \
+         patch("trading_bots.intraday_bot.datetime") as mock_dt:
+        mock_dt.now.return_value = fake_now
+        run_session(dry_run=True)
+
+    mock_intraday_client.get_account.assert_called()
+
+
 def test_spy_trending_down_false_on_fetch_error():
     """Returns False when fetch_latest_bars raises — never block on data errors."""
     from trading_bots.intraday_bot import _spy_trending_down

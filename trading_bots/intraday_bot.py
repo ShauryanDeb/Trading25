@@ -288,6 +288,16 @@ def _hard_close_all(client, positions: dict, dry_run: bool) -> None:
 # Main loop
 # ---------------------------------------------------------------------------
 
+def _market_is_open(client) -> bool:
+    """Return True only when Alpaca's clock says the market is currently open."""
+    try:
+        clock = client.get_clock()
+        return bool(clock.is_open)
+    except Exception as e:
+        log.warning("Could not fetch market clock: %s — assuming closed", e)
+        return False
+
+
 def run_session(dry_run: bool = False) -> None:
     """Run one full intraday session (9:35 AM to 3:55 PM ET)."""
     from pipeline.intraday_model import IntradayEnsemble
@@ -298,6 +308,11 @@ def run_session(dry_run: bool = False) -> None:
     model = IntradayEnsemble.load(MODEL_PATH)
     client = _get_client()
     data_client = _get_data_client()
+
+    # Market-open guard — skip entirely on holidays and weekends
+    if not _market_is_open(client):
+        log.info("Market is closed today — session cancelled")
+        return
 
     # VIX regime check — suspend session if volatility is too high
     vix = _current_vix()

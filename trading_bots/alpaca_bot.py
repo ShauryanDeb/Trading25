@@ -341,6 +341,16 @@ def main() -> None:
         while True:
             now = datetime.now(tz=timezone.utc)
             if now.weekday() < 5 and now.hour == 14 and now.minute == 35:
+                try:
+                    clock = client.get_clock()
+                except Exception as e:
+                    log.warning("Could not fetch market clock: %s — skipping rebalance", e)
+                    time.sleep(60)
+                    continue
+                if not clock.is_open:
+                    log.info("Market closed on %s (holiday?) — skipping rebalance", now.date())
+                    time.sleep(60)
+                    continue
                 log.info("--- 9:35 ET rebalance %s ---", now.date())
                 try:
                     rebalance(client, model, dry_run=False)
