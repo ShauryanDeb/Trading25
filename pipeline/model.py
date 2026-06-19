@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
@@ -46,7 +47,7 @@ class StockEnsemble:
         )
         # Isotonic calibration maps raw ensemble probabilities to true
         # frequencies so that threshold 0.55 means ~55% real confidence.
-        calibrated = CalibratedClassifierCV(voter, cv=5, method="isotonic")
+        calibrated = CalibratedClassifierCV(voter, cv=TimeSeriesSplit(n_splits=5), method="isotonic")
         return Pipeline([("scaler", StandardScaler()), ("model", calibrated)])
 
     # ------------------------------------------------------------------
