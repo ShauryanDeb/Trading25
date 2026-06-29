@@ -455,7 +455,7 @@ def test_write_trade_log_creates_csv(tmp_path):
 
 
 def test_write_trade_log_columns(tmp_path):
-    """CSV must have exactly the six required columns."""
+    """CSV must have exactly the required columns including pnl_pct and exit_reason."""
     import trading_bots.scheduler as sched_mod
 
     original_dir = sched_mod.REPORTS_DIR
@@ -467,7 +467,7 @@ def test_write_trade_log_columns(tmp_path):
         ])
         with open(out) as f:
             header = f.readline().strip().split(",")
-        assert header == ["timestamp", "symbol", "side", "qty", "price", "signal_proba"]
+        assert header == ["timestamp", "symbol", "side", "qty", "price", "signal_proba", "pnl_pct", "exit_reason"]
     finally:
         sched_mod.REPORTS_DIR = original_dir
 

@@ -62,7 +62,7 @@ UNIVERSE = [
 ]
 
 MAX_POSITION_PCT = 0.05   # 5% of portfolio per symbol
-TOP_N = 20                # max positions held at once (rank-and-cap)
+TOP_N = 10                # max positions held at once — matches backtested optimum
 MAX_PER_SECTOR = 3        # max concurrent positions within one GICS sector
 MAX_HOLD_DAYS = 3         # force-exit after 3 calendar days — limits exposure to
                           # correlated sector drawdowns that the signal doesn't catch
@@ -212,7 +212,10 @@ def rebalance(client, model, dry_run: bool = False) -> list[dict]:
 
     def _close(sym, pos, reason, close_side):
         price = _latest_price(sym) or pos["avg_entry_price"]
-        log.info("Close %s [%s] — %s", sym, pos["side"], reason)
+        entry = pos["avg_entry_price"]
+        is_short = pos["side"] == "short"
+        pnl_pct = (entry - price) / entry if is_short else (price - entry) / entry
+        log.info("Close %s [%s] PnL=%.2f%% — %s", sym, pos["side"], pnl_pct * 100, reason)
         if not dry_run:
             try:
                 client.close_position(sym)
@@ -220,6 +223,7 @@ def rebalance(client, model, dry_run: bool = False) -> list[dict]:
                     "timestamp": datetime.now(tz=timezone.utc).isoformat(),
                     "symbol": sym, "side": close_side, "qty": pos["qty"],
                     "price": price, "signal_proba": signals.get(sym, 0.0),
+                    "pnl_pct": f"{pnl_pct:.4f}", "exit_reason": reason,
                 })
             except Exception as e:
                 log.warning("  Close failed for %s: %s", sym, e)
@@ -295,14 +299,16 @@ def rebalance(client, model, dry_run: bool = False) -> list[dict]:
                 ))
                 trades.append({"timestamp": datetime.now(tz=timezone.utc).isoformat(),
                                 "symbol": sym, "side": "buy", "qty": qty,
-                                "price": price, "signal_proba": proba})
+                                "price": price, "signal_proba": proba,
+                                "pnl_pct": "", "exit_reason": ""})
             except Exception as e:
                 log.warning("  Buy failed for %s: %s", sym, e)
         else:
             log.info("  [DRY-RUN] Would buy %d x %s", qty, sym)
             trades.append({"timestamp": datetime.now(tz=timezone.utc).isoformat(),
                            "symbol": sym, "side": "buy_dry_run", "qty": qty,
-                           "price": price, "signal_proba": proba})
+                           "price": price, "signal_proba": proba,
+                           "pnl_pct": "", "exit_reason": ""})
 
     # ---- Short entries ----
     all_short = sorted(
@@ -340,14 +346,16 @@ def rebalance(client, model, dry_run: bool = False) -> list[dict]:
                 ))
                 trades.append({"timestamp": datetime.now(tz=timezone.utc).isoformat(),
                                 "symbol": sym, "side": "sell_short", "qty": qty,
-                                "price": price, "signal_proba": proba})
+                                "price": price, "signal_proba": proba,
+                                "pnl_pct": "", "exit_reason": ""})
             except Exception as e:
                 log.warning("  Short failed for %s: %s", sym, e)
         else:
             log.info("  [DRY-RUN] Would short %d x %s", qty, sym)
             trades.append({"timestamp": datetime.now(tz=timezone.utc).isoformat(),
                            "symbol": sym, "side": "sell_short_dry_run", "qty": qty,
-                           "price": price, "signal_proba": proba})
+                           "price": price, "signal_proba": proba,
+                           "pnl_pct": "", "exit_reason": ""})
 
     return trades
 

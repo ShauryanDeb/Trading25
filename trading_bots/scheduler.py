@@ -47,7 +47,7 @@ def _write_trade_log(trades: list[dict]) -> Path:
     REPORTS_DIR.mkdir(exist_ok=True)
     date_str = datetime.now(tz=ET).strftime("%Y%m%d")
     out_path = REPORTS_DIR / f"trades_{date_str}.csv"
-    fieldnames = ["timestamp", "symbol", "side", "qty", "price", "signal_proba"]
+    fieldnames = ["timestamp", "symbol", "side", "qty", "price", "signal_proba", "pnl_pct", "exit_reason"]
     write_header = not out_path.exists()
     with open(out_path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

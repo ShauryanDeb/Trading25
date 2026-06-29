@@ -2,7 +2,7 @@
 
 Strategy:
   - Re-scores all universe symbols every 5 minutes during market hours
-  - BUY when proba_up > 0.60 and not already in position
+  - BUY when proba_up > 0.55 and not already in position
   - EXIT when: +0.75% profit target, -0.35% stop-loss, or 3:55 PM ET hard close
   - Max 10 concurrent positions at 3% each (long-only, no overnight holds)
 
@@ -68,7 +68,7 @@ ATR_MULT_STOP = 1.0       # cut loss at 1x the 14-bar ATR
 # Floor stops prevent getting clipped by bid-ask spread on low-volatility large-caps.
 MIN_STOP_PCT = 0.006      # never stop out on less than 0.6% adverse move
 MIN_TARGET_PCT = 0.012    # never take profit on less than 1.2% gain (maintains 2:1 R/R)
-VIX_MAX = 25.0            # suspend trading when VIX exceeds this level
+VIX_MAX = 30.0            # suspend trading when VIX exceeds this level (25 was too conservative — backtest showed best returns during elevated-VIX crash periods)
 MIN_HOLD_BARS = 2         # don't check exits until 2 ticks (~10 min) after entry
 ENTRY_START_HOUR = 10     # only open new positions after 10:00 AM ET
 ENTRY_END_HOUR = 15       # stop opening new positions at 3:00 PM ET
