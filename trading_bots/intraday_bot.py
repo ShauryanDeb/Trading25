@@ -59,26 +59,25 @@ UNIVERSE = [
     "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "MPC", "VLO", "PSX", "DVN",
 ]
 
-BUY_THRESHOLD = 0.55      # raised from 0.30 — only high-conviction signals; 0.30 produced
-                          # 26.8% win rate which is below the 33% needed for 2:1 R/R breakeven
+BUY_THRESHOLD = 0.55      # raised from 0.30 — only high-conviction longs
+SHORT_THRESHOLD = 0.25    # proba below this => high-conviction short
 # ATR-based exits: profit target = ATR_MULT_TARGET * ATR / price,
 #                  stop-loss    = ATR_MULT_STOP    * ATR / price
 ATR_MULT_TARGET = 2.0     # take profit at 2x the 14-bar ATR
 ATR_MULT_STOP = 1.0       # cut loss at 1x the 14-bar ATR
 # Floor stops prevent getting clipped by bid-ask spread on low-volatility large-caps.
-# 5-min ATR for stocks like BAC/NKE is ~$0.05-$0.15, giving stops of 0.1-0.3% —
-# smaller than the spread itself. Floor of 0.6% keeps stops outside noise.
 MIN_STOP_PCT = 0.006      # never stop out on less than 0.6% adverse move
 MIN_TARGET_PCT = 0.012    # never take profit on less than 1.2% gain (maintains 2:1 R/R)
 VIX_MAX = 25.0            # suspend trading when VIX exceeds this level
 MIN_HOLD_BARS = 2         # don't check exits until 2 ticks (~10 min) after entry
 ENTRY_START_HOUR = 10     # only open new positions after 10:00 AM ET
 ENTRY_END_HOUR = 15       # stop opening new positions at 3:00 PM ET
-MAX_POSITIONS = 10        # max concurrent holdings
+MAX_POSITIONS = 10        # max concurrent long holdings
+MAX_SHORT_POSITIONS = 5   # max concurrent short holdings
 POSITION_PCT = 0.03       # 3% of portfolio per position
 HARD_CLOSE_HOUR = 15      # 3 PM ET
 HARD_CLOSE_MINUTE = 55    # 3:55 PM ET
-SPY_BARS_DOWN = 3         # number of consecutive negative SPY 5-min bars that block new entries
+SPY_BARS_DOWN = 3         # consecutive negative SPY bars that block new long entries
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +146,29 @@ def _spy_trending_down() -> bool:
         return False
 
 
+def _spy_trending_up() -> bool:
+    """Return True if the last SPY_BARS_DOWN 5-min bars all closed higher.
+
+    Used to block new short entries when the broad market is rallying —
+    shorting into an up-tape produces systematic stop-outs.
+    Returns False (allow short entries) on any data error.
+    """
+    try:
+        from pipeline.intraday_data import fetch_latest_bars
+        bars = fetch_latest_bars("SPY", n=SPY_BARS_DOWN + 2)
+        if len(bars) < SPY_BARS_DOWN + 1:
+            return False
+        closes = bars["Close"].iloc[-(SPY_BARS_DOWN + 1):]
+        changes = closes.diff().dropna()
+        up_streak = all(c > 0 for c in changes.iloc[-SPY_BARS_DOWN:])
+        if up_streak:
+            log.info("SPY up %d consecutive bars — blocking new short entries", SPY_BARS_DOWN)
+        return up_streak
+    except Exception as e:
+        log.debug("SPY direction check failed: %s", e)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Trade log
 # ---------------------------------------------------------------------------
@@ -200,11 +222,17 @@ def _score_symbol(model, symbol: str) -> tuple[float, float] | None:
 def _get_positions(client) -> dict[str, dict]:
     result = {}
     for p in client.get_all_positions():
+        side = str(p.side).lower()
+        if "short" in side:
+            side = "short"
+        else:
+            side = "long"
         result[p.symbol] = {
             "qty": float(p.qty),
             "avg_entry_price": float(p.avg_entry_price),
             "market_value": float(p.market_value),
             "current_price": float(p.current_price),
+            "side": side,
         }
     return result
 
@@ -213,20 +241,18 @@ def _check_exits(client, positions: dict, dry_run: bool,
                  stopped_out: set | None = None) -> set:
     """Check ATR-scaled profit target and stop-loss on eligible positions.
 
+    Handles both long and short positions — PnL direction is inverted for shorts.
     Returns set of symbols that hit stop-loss (to add to session cooldown).
     """
-    from alpaca.trading.enums import OrderSide, TimeInForce
-    from alpaca.trading.requests import MarketOrderRequest
-
     newly_stopped: set[str] = set()
     for sym, pos in positions.items():
         entry = pos["avg_entry_price"]
         price = pos["current_price"]
-        pnl_pct = (price - entry) / entry
+        is_short = pos.get("side") == "short"
 
-        # ATR-based dynamic targets: scale by each stock's volatility.
-        # Floor prevents stops smaller than the bid-ask spread on low-vol large-caps
-        # (e.g. BAC 5-min ATR ~$0.05 → raw stop -0.09%, inside the spread).
+        # For shorts, profit = price falling below entry; loss = price rising above entry
+        pnl_pct = (entry - price) / entry if is_short else (price - entry) / entry
+
         atr = pos.get("entry_atr", 0.0)
         if atr > 0 and entry > 0:
             profit_target = max(ATR_MULT_TARGET * atr / entry, MIN_TARGET_PCT)
@@ -242,13 +268,16 @@ def _check_exits(client, positions: dict, dry_run: bool,
             reason = "stop_loss"
 
         if reason:
-            log.info("EXIT %s @ $%.2f  PnL=%.2f%%  reason=%s", sym, price, pnl_pct * 100, reason)
+            side_label = "short" if is_short else "long"
+            log.info("EXIT %s [%s] @ $%.2f  PnL=%.2f%%  reason=%s",
+                     sym, side_label, price, pnl_pct * 100, reason)
             if not dry_run:
                 try:
                     client.close_position(sym)
+                    close_side = "buy_to_cover" if is_short else "sell"
                     _log_trade({
                         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                        "symbol": sym, "side": "sell", "qty": pos["qty"],
+                        "symbol": sym, "side": close_side, "qty": pos["qty"],
                         "price": price, "signal_proba": "", "pnl_pct": f"{pnl_pct:.4f}",
                         "exit_reason": reason,
                     })
@@ -268,14 +297,17 @@ def _hard_close_all(client, positions: dict, dry_run: bool) -> None:
     for sym, pos in positions.items():
         price = pos["current_price"]
         entry = pos["avg_entry_price"]
-        pnl_pct = (price - entry) / entry
-        log.info("  Close %s @ $%.2f  PnL=%.2f%%", sym, price, pnl_pct * 100)
+        is_short = pos.get("side") == "short"
+        pnl_pct = (entry - price) / entry if is_short else (price - entry) / entry
+        log.info("  Close %s [%s] @ $%.2f  PnL=%.2f%%",
+                 sym, "short" if is_short else "long", price, pnl_pct * 100)
         if not dry_run:
             try:
                 client.close_position(sym)
+                close_side = "buy_to_cover" if is_short else "sell"
                 _log_trade({
                     "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                    "symbol": sym, "side": "sell", "qty": pos["qty"],
+                    "symbol": sym, "side": close_side, "qty": pos["qty"],
                     "price": price, "signal_proba": "", "pnl_pct": f"{pnl_pct:.4f}",
                     "exit_reason": "hard_close",
                 })
@@ -328,9 +360,12 @@ def run_session(dry_run: bool = False) -> None:
              portfolio_value, float(account.buying_power))
 
     max_alloc = portfolio_value * POSITION_PCT
-    stopped_out: set[str] = set()    # symbols cooled-off after a stop-loss this session
-    entry_tick: dict[str, int] = {}  # symbol -> tick count at entry (for min hold)
-    entry_atr: dict[str, float] = {} # symbol -> ATR at time of entry (for exit sizing)
+    stopped_out: set[str] = set()         # cooled-off after long stop-loss
+    short_stopped_out: set[str] = set()   # cooled-off after short stop-loss
+    entry_tick: dict[str, int] = {}       # symbol -> tick at long entry
+    entry_atr: dict[str, float] = {}      # symbol -> ATR at long entry
+    short_entry_tick: dict[str, int] = {} # symbol -> tick at short entry
+    short_entry_atr: dict[str, float] = {}# symbol -> ATR at short entry
     tick = 0
 
     while True:
@@ -354,81 +389,125 @@ def run_session(dry_run: bool = False) -> None:
         log.info("--- Tick %s ---", now.strftime("%H:%M"))
         tick += 1
 
-        # Check exits on open positions — but respect MIN_HOLD_BARS
+        # Check exits — attach stored ATR, split long/short for min-hold tracking
         positions = _get_positions(client)
-        # Attach stored ATR so _check_exits can compute dynamic targets
-        for sym in positions:
-            positions[sym]["entry_atr"] = entry_atr.get(sym, 0.0)
+        for sym, pos in positions.items():
+            if pos["side"] == "short":
+                pos["entry_atr"] = short_entry_atr.get(sym, 0.0)
+                eligible_tick = short_entry_tick.get(sym, 0)
+            else:
+                pos["entry_atr"] = entry_atr.get(sym, 0.0)
+                eligible_tick = entry_tick.get(sym, 0)
+            pos["_eligible"] = (tick - eligible_tick) >= MIN_HOLD_BARS
+
         if positions:
-            eligible = {s: p for s, p in positions.items()
-                        if tick - entry_tick.get(s, 0) >= MIN_HOLD_BARS}
+            eligible = {s: p for s, p in positions.items() if p.get("_eligible")}
             if eligible:
-                exited = _check_exits(client, eligible, dry_run, stopped_out)
-                stopped_out.update(exited)
+                exited = _check_exits(client, eligible, dry_run)
+                # Route stop-outs to the correct cooldown set by side
+                for sym in exited:
+                    if positions[sym]["side"] == "short":
+                        short_stopped_out.add(sym)
+                    else:
+                        stopped_out.add(sym)
+                    log.info("  %s cooled off for rest of session", sym)
             positions = _get_positions(client)  # refresh after exits
 
-        # Only open new positions within the allowed time window
-        entry_allowed = ENTRY_START_HOUR <= now.hour < ENTRY_END_HOUR
-        if len(positions) < MAX_POSITIONS and entry_allowed:
-            # Block new longs when the broad market is in an intraday downtrend.
-            # Entering positions into a falling tape produces systematic stop-outs
-            # because the ATR-based stops can't distinguish signal from market drift.
-            if _spy_trending_down():
-                log.info("SPY downtrend — skipping new entries this tick")
-                time.sleep(300)
-                continue
+        long_positions = {s: p for s, p in positions.items() if p["side"] == "long"}
+        short_positions = {s: p for s, p in positions.items() if p["side"] == "short"}
 
-            slots = MAX_POSITIONS - len(positions)
-            candidates = []
+        entry_allowed = ENTRY_START_HOUR <= now.hour < ENTRY_END_HOUR
+        if not entry_allowed:
+            log.info("Outside entry window (%d:00–%d:00 ET) — monitoring exits only",
+                     ENTRY_START_HOUR, ENTRY_END_HOUR)
+            time.sleep(300)
+            continue
+
+        spy_down = _spy_trending_down()
+        spy_up = _spy_trending_up()
+
+        # ---- Long entries ----
+        if len(long_positions) < MAX_POSITIONS and not spy_down:
+            slots = MAX_POSITIONS - len(long_positions)
+            long_candidates = []
             for sym in UNIVERSE:
                 if sym in positions or sym in stopped_out:
                     continue
                 result = _score_symbol(model, sym)
                 if result is not None:
                     proba, atr = result
-                    log.debug("  %s  proba=%.3f  atr=%.4f", sym, proba, atr)
                     if proba > BUY_THRESHOLD:
-                        candidates.append((sym, proba, atr))
+                        long_candidates.append((sym, proba, atr))
 
-            # Rank by proba, take top available slots
-            candidates.sort(key=lambda x: x[1], reverse=True)
-            for sym, proba, atr in candidates[:slots]:
-                # Use live ask price for accurate entry cost
+            long_candidates.sort(key=lambda x: x[1], reverse=True)
+            for sym, proba, atr in long_candidates[:slots]:
                 price = _live_ask(data_client, sym)
                 if not price or price <= 0:
                     continue
-
                 qty = int(max_alloc / price)
                 if qty < 1:
                     continue
-
-                log.info("BUY %d x %s @ ask $%.2f  proba=%.3f  atr=%.4f", qty, sym, price, proba, atr)
+                log.info("BUY %d x %s @ $%.2f  proba=%.3f", qty, sym, price, proba)
                 if not dry_run:
                     try:
-                        order = MarketOrderRequest(
-                            symbol=sym,
-                            qty=qty,
-                            side=OrderSide.BUY,
-                            time_in_force=TimeInForce.DAY,
-                        )
-                        client.submit_order(order)
+                        client.submit_order(MarketOrderRequest(
+                            symbol=sym, qty=qty,
+                            side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
+                        ))
                         entry_tick[sym] = tick
                         entry_atr[sym] = atr
-                        _log_trade({
-                            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                            "symbol": sym, "side": "buy", "qty": qty,
-                            "price": price, "signal_proba": proba,
-                            "pnl_pct": "", "exit_reason": "",
-                        })
+                        _log_trade({"timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                                    "symbol": sym, "side": "buy", "qty": qty,
+                                    "price": price, "signal_proba": proba,
+                                    "pnl_pct": "", "exit_reason": ""})
                     except Exception as e:
-                        log.warning("  Order failed for %s: %s", sym, e)
+                        log.warning("  Long order failed for %s: %s", sym, e)
                 else:
                     log.info("  [DRY-RUN] Would buy %d x %s", qty, sym)
-        elif not entry_allowed:
-            log.info("Outside entry window (%d:00–%d:00 ET) — monitoring exits only",
-                     ENTRY_START_HOUR, ENTRY_END_HOUR)
-        else:
-            log.info("Max positions (%d) reached — monitoring exits only", MAX_POSITIONS)
+        elif spy_down:
+            log.info("SPY downtrend — skipping new long entries this tick")
+
+        # ---- Short entries ----
+        if len(short_positions) < MAX_SHORT_POSITIONS and not spy_up:
+            short_slots = MAX_SHORT_POSITIONS - len(short_positions)
+            short_candidates = []
+            for sym in UNIVERSE:
+                if sym in positions or sym in short_stopped_out:
+                    continue
+                result = _score_symbol(model, sym)
+                if result is not None:
+                    proba, atr = result
+                    if proba < SHORT_THRESHOLD:
+                        short_candidates.append((sym, proba, atr))
+
+            # Rank by lowest proba first (highest conviction shorts)
+            short_candidates.sort(key=lambda x: x[1])
+            for sym, proba, atr in short_candidates[:short_slots]:
+                price = _live_ask(data_client, sym)
+                if not price or price <= 0:
+                    continue
+                qty = int(max_alloc / price)
+                if qty < 1:
+                    continue
+                log.info("SHORT %d x %s @ $%.2f  proba=%.3f", qty, sym, price, proba)
+                if not dry_run:
+                    try:
+                        client.submit_order(MarketOrderRequest(
+                            symbol=sym, qty=qty,
+                            side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
+                        ))
+                        short_entry_tick[sym] = tick
+                        short_entry_atr[sym] = atr
+                        _log_trade({"timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                                    "symbol": sym, "side": "sell_short", "qty": qty,
+                                    "price": price, "signal_proba": proba,
+                                    "pnl_pct": "", "exit_reason": ""})
+                    except Exception as e:
+                        log.warning("  Short order failed for %s: %s", sym, e)
+                else:
+                    log.info("  [DRY-RUN] Would short %d x %s", qty, sym)
+        elif spy_up:
+            log.info("SPY uptrend — skipping new short entries this tick")
 
         # Sleep until next 5-min bar
         time.sleep(300)

@@ -67,8 +67,10 @@ MAX_PER_SECTOR = 3        # max concurrent positions within one GICS sector
 MAX_HOLD_DAYS = 3         # force-exit after 3 calendar days — limits exposure to
                           # correlated sector drawdowns that the signal doesn't catch
 BUY_THRESHOLD = 0.48      # predict_proba > this => BUY candidate
-SELL_THRESHOLD = 0.42     # predict_proba < this => SELL/SKIP
-STOP_LOSS_PCT = -0.07     # -7% from entry => stop-loss
+SELL_THRESHOLD = 0.42     # predict_proba < this => exit long / SELL/SKIP
+SHORT_THRESHOLD = 0.30    # predict_proba < this => SHORT candidate
+COVER_THRESHOLD = 0.48    # predict_proba > this => cover short (signal recovered)
+STOP_LOSS_PCT = -0.07     # -7% from entry => stop-loss (long); +7% => stop (short)
 
 SECTOR_MAP: dict[str, list[str]] = {
     "Tech":        ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","ORCL","ADBE",
@@ -114,13 +116,16 @@ def _buying_power(client) -> float:
 
 
 def _current_positions(client) -> dict[str, dict]:
-    """Return {symbol: {market_value, avg_entry_price, qty}}."""
+    """Return {symbol: {market_value, avg_entry_price, qty, side}}."""
     result = {}
     for p in client.get_all_positions():
+        side = str(p.side).lower()
+        side = "short" if "short" in side else "long"
         result[p.symbol] = {
             "market_value": float(p.market_value),
             "avg_entry_price": float(p.avg_entry_price),
             "qty": float(p.qty),
+            "side": side,
         }
     return result
 
@@ -137,22 +142,30 @@ def _latest_price(symbol: str) -> float | None:
         return None
 
 
-def _entry_dates() -> dict[str, pd.Timestamp]:
-    """Scan trade CSVs to find the most recent buy date for each symbol."""
-    dates: dict[str, pd.Timestamp] = {}
+def _entry_dates() -> tuple[dict[str, pd.Timestamp], dict[str, pd.Timestamp]]:
+    """Scan trade CSVs to find the most recent entry date for longs and shorts.
+
+    Returns (long_dates, short_dates) — each {symbol: timestamp}.
+    """
+    long_dates: dict[str, pd.Timestamp] = {}
+    short_dates: dict[str, pd.Timestamp] = {}
     report_dir = Path(__file__).resolve().parent.parent / "reports"
     for csv_path in sorted(report_dir.glob("trades_*.csv")):
         try:
             df = pd.read_csv(csv_path, parse_dates=["timestamp"])
             for _, row in df.iterrows():
-                if str(row.get("side", "")).startswith("buy"):
-                    sym = row["symbol"]
-                    ts = pd.Timestamp(row["timestamp"]).tz_localize(None)
-                    if sym not in dates or ts > dates[sym]:
-                        dates[sym] = ts
+                side = str(row.get("side", ""))
+                sym = row["symbol"]
+                ts = pd.Timestamp(row["timestamp"]).tz_localize(None)
+                if side.startswith("buy") and not side.startswith("buy_to_cover"):
+                    if sym not in long_dates or ts > long_dates[sym]:
+                        long_dates[sym] = ts
+                elif side == "sell_short":
+                    if sym not in short_dates or ts > short_dates[sym]:
+                        short_dates[sym] = ts
         except Exception:
             pass
-    return dates
+    return long_dates, short_dates
 
 
 def _generate_signals(model, symbols: list[str]) -> dict[str, float]:
@@ -192,115 +205,149 @@ def rebalance(client, model, dry_run: bool = False) -> list[dict]:
     log.info("Open positions: %s", list(current_positions.keys()) or "none")
 
     signals = _generate_signals(model, UNIVERSE)
-    entry_dates = _entry_dates()
+    long_entry_dates, short_entry_dates = _entry_dates()
     today = pd.Timestamp.now().normalize()
     trades = []
+    max_alloc = portfolio_value * MAX_POSITION_PCT
 
-    # Check stop-losses on existing positions
+    def _close(sym, pos, reason, close_side):
+        price = _latest_price(sym) or pos["avg_entry_price"]
+        log.info("Close %s [%s] — %s", sym, pos["side"], reason)
+        if not dry_run:
+            try:
+                client.close_position(sym)
+                trades.append({
+                    "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                    "symbol": sym, "side": close_side, "qty": pos["qty"],
+                    "price": price, "signal_proba": signals.get(sym, 0.0),
+                })
+            except Exception as e:
+                log.warning("  Close failed for %s: %s", sym, e)
+        else:
+            log.info("  [DRY-RUN] Would close %s (%s)", sym, reason)
+
+    # ---- Exit existing positions ----
     for sym, pos in current_positions.items():
         price = _latest_price(sym)
-        if price and pos["avg_entry_price"] > 0:
-            pnl_pct = (price - pos["avg_entry_price"]) / pos["avg_entry_price"]
-            if pnl_pct <= STOP_LOSS_PCT:
-                log.info("STOP-LOSS triggered for %s (PnL=%.2f%%)", sym, pnl_pct * 100)
-                if not dry_run:
-                    try:
-                        client.close_position(sym)
-                        trades.append({
-                            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                            "symbol": sym, "side": "sell", "qty": pos["qty"],
-                            "price": price, "signal_proba": signals.get(sym, 0.0),
-                        })
-                    except Exception as e:
-                        log.warning("  Stop-loss close failed for %s: %s", sym, e)
-                else:
-                    log.info("  [DRY-RUN] Would close %s (stop-loss)", sym)
-
-    # Close positions past max hold period or below sell threshold
-    for sym, pos in current_positions.items():
+        if not price or pos["avg_entry_price"] <= 0:
+            continue
+        entry = pos["avg_entry_price"]
+        is_short = pos["side"] == "short"
+        pnl_pct = (entry - price) / entry if is_short else (price - entry) / entry
         proba = signals.get(sym, 0.0)
-        entry = entry_dates.get(sym)
-        days_held = (today - entry.normalize()).days if entry else 0
-        reason = None
-        if days_held >= MAX_HOLD_DAYS:
-            reason = f"max_hold ({days_held}d)"
-        elif proba < SELL_THRESHOLD:
-            reason = f"signal_fade (proba={proba:.3f})"
-        if reason:
-            log.info("Closing %s — %s", sym, reason)
-            if not dry_run:
-                try:
-                    client.close_position(sym)
-                    price = _latest_price(sym) or pos["avg_entry_price"]
-                    trades.append({
-                        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                        "symbol": sym, "side": "sell", "qty": pos["qty"],
-                        "price": price, "signal_proba": proba,
-                    })
-                except Exception as e:
-                    log.warning("  Failed to close %s: %s", sym, e)
-            else:
-                log.info("  [DRY-RUN] Would close %s", sym)
 
-    # Rank buy candidates by proba, apply sector cap, cap at TOP_N
-    all_candidates = sorted(
+        if is_short:
+            entry_ts = short_entry_dates.get(sym)
+            days_held = (today - entry_ts.normalize()).days if entry_ts else 0
+            # Stop-loss: price rose above entry by STOP_LOSS_PCT (adverse for short)
+            if pnl_pct <= STOP_LOSS_PCT:
+                _close(sym, pos, f"stop_loss (PnL={pnl_pct:.2%})", "buy_to_cover")
+            elif days_held >= MAX_HOLD_DAYS:
+                _close(sym, pos, f"max_hold ({days_held}d)", "buy_to_cover")
+            elif proba >= COVER_THRESHOLD:
+                _close(sym, pos, f"signal_recovered (proba={proba:.3f})", "buy_to_cover")
+        else:
+            entry_ts = long_entry_dates.get(sym)
+            days_held = (today - entry_ts.normalize()).days if entry_ts else 0
+            if pnl_pct <= STOP_LOSS_PCT:
+                _close(sym, pos, f"stop_loss (PnL={pnl_pct:.2%})", "sell")
+            elif days_held >= MAX_HOLD_DAYS:
+                _close(sym, pos, f"max_hold ({days_held}d)", "sell")
+            elif proba < SELL_THRESHOLD:
+                _close(sym, pos, f"signal_fade (proba={proba:.3f})", "sell")
+
+    # Refresh positions after exits
+    current_positions = _current_positions(client)
+
+    # ---- Long entries ----
+    all_long = sorted(
         [(sym, p) for sym, p in signals.items() if p > BUY_THRESHOLD],
         key=lambda x: x[1], reverse=True,
     )
     sector_counts: dict[str, int] = {}
-    buy_candidates: list[tuple[str, float]] = []
-    for sym, p in all_candidates:
-        if len(buy_candidates) >= TOP_N:
+    long_candidates: list[tuple[str, float]] = []
+    for sym, p in all_long:
+        if len(long_candidates) >= TOP_N:
             break
         sector = _SYM_TO_SECTOR.get(sym, "Other")
         if sector_counts.get(sector, 0) >= MAX_PER_SECTOR:
-            log.debug("  %s skipped — sector %s at cap (%d)", sym, sector, MAX_PER_SECTOR)
             continue
-        buy_candidates.append((sym, p))
+        long_candidates.append((sym, p))
         sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
-    log.info(
-        "Buy candidates: %d above threshold, %d after sector cap (max %d/sector), keeping top %d",
-        len(all_candidates), len(buy_candidates), MAX_PER_SECTOR, len(buy_candidates),
-    )
-
-    # Open positions for ranked buy signals
-    max_alloc = portfolio_value * MAX_POSITION_PCT
-    for sym, proba in buy_candidates:
+    log.info("Long candidates: %d", len(long_candidates))
+    for sym, proba in long_candidates:
         if sym in current_positions:
             log.info("  %s already held — skipping", sym)
             continue
         price = _latest_price(sym)
         if not price or price <= 0:
-            log.warning("  No price for %s, skipping", sym)
             continue
-        target_qty = int(max_alloc / price)
-        if target_qty < 1:
+        qty = int(max_alloc / price)
+        if qty < 1:
             continue
-        log.info("BUY %d x %s @ ~$%.2f (proba=%.3f)", target_qty, sym, price, proba)
+        log.info("BUY %d x %s @ ~$%.2f (proba=%.3f)", qty, sym, price, proba)
         if not dry_run:
             try:
-                order = MarketOrderRequest(
-                    symbol=sym,
-                    qty=target_qty,
-                    side=OrderSide.BUY,
-                    time_in_force=TimeInForce.DAY,
-                )
-                client.submit_order(order)
-                trades.append({
-                    "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                    "symbol": sym, "side": "buy", "qty": target_qty,
-                    "price": price, "signal_proba": proba,
-                })
+                client.submit_order(MarketOrderRequest(
+                    symbol=sym, qty=qty,
+                    side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
+                ))
+                trades.append({"timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                                "symbol": sym, "side": "buy", "qty": qty,
+                                "price": price, "signal_proba": proba})
             except Exception as e:
-                log.warning("  Order failed for %s: %s", sym, e)
+                log.warning("  Buy failed for %s: %s", sym, e)
         else:
-            log.info("  [DRY-RUN] Would buy %d x %s", target_qty, sym)
-            trades.append({
-                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                "symbol": sym, "side": "buy_dry_run", "qty": target_qty,
-                "price": price, "signal_proba": proba,
-            })
+            log.info("  [DRY-RUN] Would buy %d x %s", qty, sym)
+            trades.append({"timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                           "symbol": sym, "side": "buy_dry_run", "qty": qty,
+                           "price": price, "signal_proba": proba})
+
+    # ---- Short entries ----
+    all_short = sorted(
+        [(sym, p) for sym, p in signals.items() if p < SHORT_THRESHOLD],
+        key=lambda x: x[1],  # lowest proba first = highest conviction
+    )
+    short_sector_counts: dict[str, int] = {}
+    short_candidates: list[tuple[str, float]] = []
+    for sym, p in all_short:
+        if len(short_candidates) >= TOP_N:
+            break
+        sector = _SYM_TO_SECTOR.get(sym, "Other")
+        if short_sector_counts.get(sector, 0) >= MAX_PER_SECTOR:
+            continue
+        short_candidates.append((sym, p))
+        short_sector_counts[sector] = short_sector_counts.get(sector, 0) + 1
+
+    log.info("Short candidates: %d", len(short_candidates))
+    for sym, proba in short_candidates:
+        if sym in current_positions:
+            log.info("  %s already held — skipping short", sym)
+            continue
+        price = _latest_price(sym)
+        if not price or price <= 0:
+            continue
+        qty = int(max_alloc / price)
+        if qty < 1:
+            continue
+        log.info("SHORT %d x %s @ ~$%.2f (proba=%.3f)", qty, sym, price, proba)
+        if not dry_run:
+            try:
+                client.submit_order(MarketOrderRequest(
+                    symbol=sym, qty=qty,
+                    side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
+                ))
+                trades.append({"timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                                "symbol": sym, "side": "sell_short", "qty": qty,
+                                "price": price, "signal_proba": proba})
+            except Exception as e:
+                log.warning("  Short failed for %s: %s", sym, e)
+        else:
+            log.info("  [DRY-RUN] Would short %d x %s", qty, sym)
+            trades.append({"timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                           "symbol": sym, "side": "sell_short_dry_run", "qty": qty,
+                           "price": price, "signal_proba": proba})
 
     return trades
 

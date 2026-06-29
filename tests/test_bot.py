@@ -159,7 +159,7 @@ def test_sector_cap_limits_buys_per_sector(mock_client, tiny_model):
     model, _ = tiny_model
     with patch("trading_bots.alpaca_bot._generate_signals", return_value=high_signals), \
          patch("trading_bots.alpaca_bot._latest_price", return_value=100.0), \
-         patch("trading_bots.alpaca_bot._entry_dates", return_value={}):
+         patch("trading_bots.alpaca_bot._entry_dates", return_value=({}, {})):
         trades = rebalance(mock_client, model, dry_run=True)
 
     tech_buys = [t for t in trades if t["symbol"] in tech_syms]
@@ -176,7 +176,7 @@ def test_sector_cap_allows_cross_sector_buys(mock_client, tiny_model):
     model, _ = tiny_model
     with patch("trading_bots.alpaca_bot._generate_signals", return_value=one_per_sector), \
          patch("trading_bots.alpaca_bot._latest_price", return_value=100.0), \
-         patch("trading_bots.alpaca_bot._entry_dates", return_value={}):
+         patch("trading_bots.alpaca_bot._entry_dates", return_value=({}, {})):
         trades = rebalance(mock_client, model, dry_run=True)
 
     bought_syms = {t["symbol"] for t in trades}
@@ -199,7 +199,7 @@ def test_no_double_buy_when_already_held(mock_client, tiny_model):
     with patch("trading_bots.alpaca_bot._generate_signals",
                return_value={"AAPL": 0.90}), \
          patch("trading_bots.alpaca_bot._latest_price", return_value=200.0), \
-         patch("trading_bots.alpaca_bot._entry_dates", return_value={}):
+         patch("trading_bots.alpaca_bot._entry_dates", return_value=({}, {})):
         trades = rebalance(mock_client, model, dry_run=True)
 
     buy_trades = [t for t in trades if t["symbol"] == "AAPL" and "buy" in t["side"]]
@@ -223,7 +223,7 @@ def test_max_hold_triggers_close(mock_client, tiny_model):
                return_value={"AAPL": 0.50}), \
          patch("trading_bots.alpaca_bot._latest_price", return_value=100.0), \
          patch("trading_bots.alpaca_bot._entry_dates",
-               return_value={"AAPL": stale_entry}):
+               return_value=({"AAPL": stale_entry}, {})):
         rebalance(mock_client, model, dry_run=False)
 
     mock_client.close_position.assert_called()
@@ -247,7 +247,7 @@ def test_max_hold_no_close_when_fresh(mock_client, tiny_model):
                return_value={"MSFT": SELL_THRESHOLD + 0.10}), \
          patch("trading_bots.alpaca_bot._latest_price", return_value=100.0), \
          patch("trading_bots.alpaca_bot._entry_dates",
-               return_value={"MSFT": fresh_entry}):
+               return_value=({"MSFT": fresh_entry}, {})):
         rebalance(mock_client, model, dry_run=False)
 
     # Stop-loss won't fire (pnl=0%), max-hold won't fire (1 day), signal OK
@@ -270,10 +270,113 @@ def test_signal_fade_triggers_close(mock_client, tiny_model):
     with patch("trading_bots.alpaca_bot._generate_signals",
                return_value={"NVDA": SELL_THRESHOLD - 0.05}), \
          patch("trading_bots.alpaca_bot._latest_price", return_value=100.0), \
-         patch("trading_bots.alpaca_bot._entry_dates", return_value={}):
+         patch("trading_bots.alpaca_bot._entry_dates", return_value=({}, {})):
         rebalance(mock_client, model, dry_run=False)
 
     mock_client.close_position.assert_called()
+
+
+def test_short_entry_fires_on_low_proba(mock_client, tiny_model):
+    """Symbol with proba below SHORT_THRESHOLD should generate a sell_short trade."""
+    from trading_bots.alpaca_bot import rebalance, SHORT_THRESHOLD
+
+    model, _ = tiny_model
+    with patch("trading_bots.alpaca_bot._generate_signals",
+               return_value={"DVN": SHORT_THRESHOLD - 0.05}), \
+         patch("trading_bots.alpaca_bot._latest_price", return_value=50.0), \
+         patch("trading_bots.alpaca_bot._entry_dates", return_value=({}, {})):
+        trades = rebalance(mock_client, model, dry_run=True)
+
+    short_trades = [t for t in trades if "sell_short" in t["side"]]
+    assert any(t["symbol"] == "DVN" for t in short_trades), \
+        "Low-proba symbol should generate a short entry"
+
+
+def test_short_not_opened_when_already_held(mock_client, tiny_model):
+    """An already-held symbol (any side) must not be shorted."""
+    from trading_bots.alpaca_bot import rebalance, SHORT_THRESHOLD
+
+    pos = MagicMock()
+    pos.symbol = "DVN"
+    pos.market_value = "500.00"
+    pos.avg_entry_price = "50.00"
+    pos.qty = "10"
+    pos.side = "long"
+    mock_client.get_all_positions.return_value = [pos]
+
+    model, _ = tiny_model
+    with patch("trading_bots.alpaca_bot._generate_signals",
+               return_value={"DVN": SHORT_THRESHOLD - 0.05}), \
+         patch("trading_bots.alpaca_bot._latest_price", return_value=50.0), \
+         patch("trading_bots.alpaca_bot._entry_dates", return_value=({}, {})):
+        trades = rebalance(mock_client, model, dry_run=True)
+
+    short_trades = [t for t in trades if "sell_short" in t.get("side", "")]
+    assert not any(t["symbol"] == "DVN" for t in short_trades), \
+        "Should not short a symbol that is already held long"
+
+
+def test_short_cover_on_signal_recovery(mock_client, tiny_model):
+    """Short position is covered when proba rises above COVER_THRESHOLD."""
+    from trading_bots.alpaca_bot import rebalance, COVER_THRESHOLD
+
+    pos = MagicMock()
+    pos.symbol = "SLB"
+    pos.market_value = "-500.00"
+    pos.avg_entry_price = "50.00"
+    pos.qty = "10"
+    pos.side = "short"
+    mock_client.get_all_positions.return_value = [pos]
+
+    model, _ = tiny_model
+    with patch("trading_bots.alpaca_bot._generate_signals",
+               return_value={"SLB": COVER_THRESHOLD + 0.05}), \
+         patch("trading_bots.alpaca_bot._latest_price", return_value=48.0), \
+         patch("trading_bots.alpaca_bot._entry_dates", return_value=({}, {})):
+        rebalance(mock_client, model, dry_run=False)
+
+    mock_client.close_position.assert_called_with("SLB")
+
+
+def test_intraday_short_exit_profits_on_price_drop():
+    """Short position exits at profit when price drops below entry - ATR target."""
+    from trading_bots.intraday_bot import _check_exits, MIN_TARGET_PCT
+
+    client = MagicMock()
+    entry = 100.0
+    # Price dropped 1.5% — exceeds MIN_TARGET_PCT (1.2%) so profit target fires
+    positions = {
+        "XOM": {
+            "qty": 10, "avg_entry_price": entry,
+            "current_price": entry * (1 - MIN_TARGET_PCT - 0.003),
+            "entry_atr": 0.0, "side": "short",
+        }
+    }
+    with patch("trading_bots.intraday_bot._log_trade"):
+        stopped = _check_exits(client, positions, dry_run=False)
+
+    client.close_position.assert_called_once_with("XOM")
+    assert "XOM" not in stopped, "Profit exit should not add to cooldown"
+
+
+def test_intraday_short_stop_on_price_rise():
+    """Short position stops out when price rises above entry + ATR stop."""
+    from trading_bots.intraday_bot import _check_exits, MIN_STOP_PCT
+
+    client = MagicMock()
+    entry = 100.0
+    positions = {
+        "CVX": {
+            "qty": 10, "avg_entry_price": entry,
+            "current_price": entry * (1 + MIN_STOP_PCT + 0.001),
+            "entry_atr": 0.0, "side": "short",
+        }
+    }
+    with patch("trading_bots.intraday_bot._log_trade"):
+        stopped = _check_exits(client, positions, dry_run=False)
+
+    client.close_position.assert_called_once_with("CVX")
+    assert "CVX" in stopped, "Stop-loss on short should add to cooldown"
 
 
 def test_entry_dates_reads_buys_from_csv(tmp_path):
