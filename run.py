@@ -66,19 +66,43 @@ def cmd_train(args):
 
 
 def cmd_backtest(args):
-    from pipeline.features import build_features_for_symbol
-    from backtest.walk_forward import summary, walk_forward
+    from pipeline.backtest import SCENARIOS, DEFAULT_UNIVERSE, run_swing_backtest, print_report
 
-    print(f"Running walk-forward backtest for {args.symbol}...")
-    feats = build_features_for_symbol(args.symbol, start=args.start)
-    results = walk_forward(feats, n_folds=args.folds)
-    tbl = summary(results)
-    if getattr(args, "verbose", False):
-        for r in results:
-            print(f"Fold {r.fold}: Sharpe={r.sharpe:.3f}  MaxDD={r.max_drawdown:.2%}  "
-                  f"Return={r.total_return:.2%}  Trades={r.n_trades}")
-        print()
-    print(tbl.to_string(index=False))
+    # Resolve date range
+    scenario_name = getattr(args, "scenario", None)
+    if scenario_name:
+        if scenario_name not in SCENARIOS:
+            print(f"Unknown scenario '{scenario_name}'. Available: {', '.join(SCENARIOS)}")
+            sys.exit(1)
+        start, end = SCENARIOS[scenario_name]
+        label = scenario_name
+    else:
+        start = getattr(args, "start", "2022-01-01")
+        end = getattr(args, "end", None) or __import__("pandas").Timestamp.today().strftime("%Y-%m-%d")
+        label = f"{start}_to_{end}"
+
+    capital = float(getattr(args, "capital", 50_000))
+    verbose = getattr(args, "verbose", False)
+    universe = getattr(args, "universe", False)
+    symbols = UNIVERSE if universe else DEFAULT_UNIVERSE
+
+    print(f"\nBacktest: {label}  |  capital=${capital:,.0f}  |  {len(symbols)} symbols")
+
+    result = run_swing_backtest(
+        model_path="models/model.pkl",
+        symbols=symbols,
+        start=start,
+        end=end,
+        initial_capital=capital,
+        verbose=verbose,
+    )
+    print_report(result, scenario_name=label)
+
+    # Save trade log
+    if not result["trades"].empty:
+        out_path = f"reports/backtest_{label.replace(' → ', '_').replace('-', '')}.csv"
+        result["trades"].to_csv(out_path, index=False)
+        print(f"\n  Trade log saved: {out_path}")
 
 
 def main():
@@ -102,10 +126,15 @@ def main():
     p_train.add_argument("--output", default="models/model.pkl")
 
     # backtest
-    p_bt = sub.add_parser("backtest", help="Walk-forward backtest")
-    p_bt.add_argument("symbol")
-    p_bt.add_argument("--start", default="2015-01-01")
-    p_bt.add_argument("--folds", type=int, default=5)
+    p_bt = sub.add_parser("backtest", help="Portfolio backtest against historical scenarios")
+    p_bt.add_argument(
+        "--scenario", default=None,
+        help="Named scenario: 2020-crash, 2022-bear, 2023-recovery, 2024-bull, ytd, 3yr",
+    )
+    p_bt.add_argument("--start", default="2022-01-01", help="Start date (ignored if --scenario set)")
+    p_bt.add_argument("--end", default=None, help="End date (ignored if --scenario set)")
+    p_bt.add_argument("--capital", type=float, default=50_000, help="Starting capital")
+    p_bt.add_argument("--universe", action="store_true", help="Use full 100-symbol universe")
     p_bt.add_argument("-v", "--verbose", action="store_true")
 
     args = parser.parse_args()
