@@ -66,8 +66,8 @@ TOP_N = 20                # max positions held at once (rank-and-cap)
 MAX_PER_SECTOR = 3        # max concurrent positions within one GICS sector
 MAX_HOLD_DAYS = 3         # force-exit after 3 calendar days — limits exposure to
                           # correlated sector drawdowns that the signal doesn't catch
-BUY_THRESHOLD = 0.40      # predict_proba > this => BUY candidate
-SELL_THRESHOLD = 0.36     # predict_proba < this => SELL/SKIP
+BUY_THRESHOLD = 0.48      # predict_proba > this => BUY candidate
+SELL_THRESHOLD = 0.42     # predict_proba < this => SELL/SKIP
 STOP_LOSS_PCT = -0.07     # -7% from entry => stop-loss
 
 SECTOR_MAP: dict[str, list[str]] = {
@@ -267,9 +267,8 @@ def rebalance(client, model, dry_run: bool = False) -> list[dict]:
     # Open positions for ranked buy signals
     max_alloc = portfolio_value * MAX_POSITION_PCT
     for sym, proba in buy_candidates:
-        current_val = current_positions.get(sym, {}).get("market_value", 0.0)
-        if current_val >= max_alloc * 0.95:
-            log.info("  %s already fully allocated", sym)
+        if sym in current_positions:
+            log.info("  %s already held — skipping", sym)
             continue
         price = _latest_price(sym)
         if not price or price <= 0:

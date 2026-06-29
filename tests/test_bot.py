@@ -183,6 +183,29 @@ def test_sector_cap_allows_cross_sector_buys(mock_client, tiny_model):
     assert len(bought_syms) == len(SECTOR_MAP)
 
 
+def test_no_double_buy_when_already_held(mock_client, tiny_model):
+    """A symbol already in open positions must never be bought a second time."""
+    from trading_bots.alpaca_bot import rebalance
+
+    # AAPL is already open
+    pos = MagicMock()
+    pos.symbol = "AAPL"
+    pos.market_value = "200.00"   # well below alloc — old guard would allow re-buy
+    pos.avg_entry_price = "180.00"
+    pos.qty = "1"
+    mock_client.get_all_positions.return_value = [pos]
+
+    model, _ = tiny_model
+    with patch("trading_bots.alpaca_bot._generate_signals",
+               return_value={"AAPL": 0.90}), \
+         patch("trading_bots.alpaca_bot._latest_price", return_value=200.0), \
+         patch("trading_bots.alpaca_bot._entry_dates", return_value={}):
+        trades = rebalance(mock_client, model, dry_run=True)
+
+    buy_trades = [t for t in trades if t["symbol"] == "AAPL" and "buy" in t["side"]]
+    assert len(buy_trades) == 0, "Should not buy a symbol that is already held"
+
+
 def test_max_hold_triggers_close(mock_client, tiny_model):
     """Position held MAX_HOLD_DAYS+1 days forces close regardless of signal."""
     from trading_bots.alpaca_bot import rebalance, MAX_HOLD_DAYS

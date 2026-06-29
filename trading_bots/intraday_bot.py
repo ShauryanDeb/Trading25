@@ -59,7 +59,8 @@ UNIVERSE = [
     "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "MPC", "VLO", "PSX", "DVN",
 ]
 
-BUY_THRESHOLD = 0.30      # calibrated model with 30-min/0.20% label: signals peak ~0.32
+BUY_THRESHOLD = 0.55      # raised from 0.30 — only high-conviction signals; 0.30 produced
+                          # 26.8% win rate which is below the 33% needed for 2:1 R/R breakeven
 # ATR-based exits: profit target = ATR_MULT_TARGET * ATR / price,
 #                  stop-loss    = ATR_MULT_STOP    * ATR / price
 ATR_MULT_TARGET = 2.0     # take profit at 2x the 14-bar ATR
