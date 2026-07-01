@@ -105,6 +105,24 @@ def cmd_backtest(args):
         print(f"\n  Trade log saved: {out_path}")
 
 
+def cmd_walkforward(args):
+    from pipeline.walkforward import walk_forward, print_walk_forward
+
+    result = walk_forward(
+        start_year=args.start_year,
+        target_mode=args.target,
+        entry_mode=args.entry,
+        cost_bps=args.cost_bps,
+        initial_capital=args.capital,
+        verbose=args.verbose,
+    )
+    print_walk_forward(result, label=f"{args.target} / {args.entry}")
+    if not result["trades"].empty:
+        out = f"reports/walkforward_{args.target}_{args.entry}.csv"
+        result["trades"].to_csv(out, index=False)
+        print(f"\n  Trade log saved: {out}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Trading ML pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -137,8 +155,25 @@ def main():
     p_bt.add_argument("--universe", action="store_true", help="Use full 100-symbol universe")
     p_bt.add_argument("-v", "--verbose", action="store_true")
 
+    # walkforward — the honest evaluation
+    p_wf = sub.add_parser(
+        "walkforward",
+        help="Yearly walk-forward evaluation (train strictly before each test year)",
+    )
+    p_wf.add_argument("--start-year", type=int, default=2021,
+                      help="First out-of-sample test year")
+    p_wf.add_argument("--target", default="abs_3d", choices=["abs_3d", "rel_5d"],
+                      help="Label the model trains on")
+    p_wf.add_argument("--entry", default="rank", choices=["rank", "threshold"],
+                      help="Entry selection: cross-sectional rank or fixed thresholds")
+    p_wf.add_argument("--cost-bps", type=float, default=5.0,
+                      help="One-way slippage cost in basis points")
+    p_wf.add_argument("--capital", type=float, default=50_000)
+    p_wf.add_argument("-v", "--verbose", action="store_true")
+
     args = parser.parse_args()
-    {"fetch": cmd_fetch, "train": cmd_train, "backtest": cmd_backtest}[args.command](args)
+    {"fetch": cmd_fetch, "train": cmd_train, "backtest": cmd_backtest,
+     "walkforward": cmd_walkforward}[args.command](args)
 
 
 if __name__ == "__main__":

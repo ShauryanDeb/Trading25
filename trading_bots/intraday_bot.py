@@ -557,6 +557,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Intraday momentum scalping bot")
     parser.add_argument("--dry-run", action="store_true",
                         help="Run signals and log, but do not place any orders")
+    parser.add_argument("--live", action="store_true",
+                        help="Place real paper orders. Without this flag the session runs "
+                             "in DRY-RUN — strategy has no demonstrated out-of-sample edge yet.")
     parser.add_argument("--train", action="store_true",
                         help="Train the intraday model on all universe symbols then exit")
     parser.add_argument("--train-symbols", nargs="+", default=None,
@@ -578,8 +581,11 @@ def main() -> None:
         log.warning("Today is a weekend — no market session. Exiting.")
         sys.exit(0)
 
-    log.info("Starting intraday session  dry_run=%s", args.dry_run)
-    run_session(dry_run=args.dry_run)
+    dry_run = args.dry_run or not args.live
+    if dry_run:
+        log.warning("DRY-RUN MODE (default): signals logged, no orders. Pass --live to trade.")
+    log.info("Starting intraday session  dry_run=%s", dry_run)
+    run_session(dry_run=dry_run)
 
 
 if __name__ == "__main__":

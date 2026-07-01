@@ -121,6 +121,12 @@ def main() -> None:
         "--run-now", action="store_true",
         help="Run one live cycle immediately (real paper orders) then exit",
     )
+    parser.add_argument(
+        "--live", action="store_true",
+        help="Place real paper orders in the scheduled daily cycle. Without this "
+             "flag the scheduler runs in DRY-RUN (signals logged, no orders) — "
+             "strategy has no demonstrated out-of-sample edge yet.",
+    )
     args = parser.parse_args()
 
     if args.test_now:
@@ -135,6 +141,13 @@ def main() -> None:
 
     from apscheduler.schedulers.blocking import BlockingScheduler
 
+    dry_run = not args.live
+    if dry_run:
+        log.warning("DRY-RUN MODE (default): signals will be logged but NO orders placed. "
+                    "Pass --live to trade for real.")
+    else:
+        log.warning("LIVE MODE: real paper orders will be placed at each 09:35 ET cycle.")
+
     scheduler = BlockingScheduler(timezone=ET)
     scheduler.add_job(
         run_cycle,
@@ -142,7 +155,7 @@ def main() -> None:
         day_of_week="mon-fri",
         hour=9,
         minute=35,
-        kwargs={"dry_run": False},
+        kwargs={"dry_run": dry_run},
         id="daily_rebalance",
         name="Daily 9:35 ET rebalance",
     )

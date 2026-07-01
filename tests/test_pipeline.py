@@ -190,15 +190,76 @@ def test_rel_return_equals_stock_return_when_spy_flat(_rising_ohlcv, _flat_macro
 
 
 def test_label_mostly_one_when_stock_outperforms(_rising_ohlcv, _flat_macro):
-    """Stock +0.15%/day mean drift with 0% SPY → 5-day alpha >> 0.3% → label mostly 1."""
-    feats = build_features(_rising_ohlcv, macro=_flat_macro)
+    """rel_5d: stock +0.15%/day with 0% SPY → 5-day alpha >> 0.3% → label mostly 1."""
+    feats = build_features(_rising_ohlcv, macro=_flat_macro, target_mode="rel_5d")
     assert len(feats) > 0, "build_features returned empty DataFrame on synthetic data"
     label_mean = feats[LABEL_COL].mean()
     assert label_mean > 0.5, f"Expected mostly 1s given strong upward drift, got mean={label_mean:.2f}"
 
 
+def test_abs3d_label_one_on_strong_rise():
+    """abs_3d: +1%/day drift → 3-day return ~+3% > 0.5% → label mostly 1.
+
+    Noise must be large enough to produce occasional down days, otherwise
+    RSI's loss denominator is zero → all-NaN → dropna removes every row.
+    """
+    n = 200
+    rng = np.random.default_rng(7)
+    dates = pd.bdate_range("2022-01-03", periods=n)
+    close = 100.0 * np.cumprod(1 + 0.01 + rng.normal(0, 0.01, n))
+    ohlcv = pd.DataFrame(
+        {"Open": close * 0.999, "High": close * 1.005, "Low": close * 0.995,
+         "Close": close, "Volume": np.full(n, 1_000_000, dtype=float)},
+        index=dates,
+    )
+    macro = pd.DataFrame(
+        {"VIX": 15.0, "TNX": 4.0,
+         "SPY_Return_1d": 0.0, "SPY_Return_5d": 0.0, "SPY_Return_20d": 0.0},
+        index=dates,
+    )
+    feats = build_features(ohlcv, macro=macro, target_mode="abs_3d")
+    assert len(feats) > 0
+    assert feats[LABEL_COL].mean() > 0.8
+
+
+def test_abs3d_label_zero_on_decline():
+    """abs_3d: -0.5%/day drift → 3-day return ~-1.5% < +0.5% → label overwhelmingly 0."""
+    n = 200
+    rng = np.random.default_rng(11)
+    dates = pd.bdate_range("2022-01-03", periods=n)
+    close = 100.0 * np.cumprod(1 - 0.005 + rng.normal(0, 0.002, n))
+    ohlcv = pd.DataFrame(
+        {"Open": close * 1.001, "High": close * 1.005, "Low": close * 0.995,
+         "Close": close, "Volume": np.full(n, 1_000_000, dtype=float)},
+        index=dates,
+    )
+    macro = pd.DataFrame(
+        {"VIX": 15.0, "TNX": 4.0,
+         "SPY_Return_1d": 0.0, "SPY_Return_5d": 0.0, "SPY_Return_20d": 0.0},
+        index=dates,
+    )
+    feats = build_features(ohlcv, macro=macro, target_mode="abs_3d")
+    assert len(feats) > 0
+    assert feats[LABEL_COL].mean() < 0.1
+
+
+def test_walkforward_segments_never_overlap():
+    """Every training window must end strictly before its test window starts."""
+    from pipeline.walkforward import _segments
+
+    segs = _segments(2021, "2026-07-01")
+    assert len(segs) == 6
+    for train_end, test_start, test_end in segs:
+        assert pd.Timestamp(train_end) < pd.Timestamp(test_start), (
+            f"train_end {train_end} overlaps test_start {test_start}"
+        )
+        assert pd.Timestamp(test_start) <= pd.Timestamp(test_end)
+    # Final segment is clipped to the requested end date
+    assert segs[-1][2] == "2026-07-01"
+
+
 def test_label_mostly_zero_when_stock_underperforms():
-    """Stock drifts down vs SPY +1% per 5d → underperforms → label mostly 0."""
+    """rel_5d: stock drifts down vs SPY +1% per 5d → underperforms → label mostly 0."""
     n = 200
     rng = np.random.default_rng(13)
     dates = pd.bdate_range("2022-01-03", periods=n)
@@ -217,7 +278,7 @@ def test_label_mostly_zero_when_stock_underperforms():
          "SPY_Return_1d": 0.002, "SPY_Return_5d": 0.01, "SPY_Return_20d": 0.04},
         index=dates,
     )
-    feats = build_features(ohlcv, macro=macro)
+    feats = build_features(ohlcv, macro=macro, target_mode="rel_5d")
     assert len(feats) > 0, "build_features returned empty DataFrame"
     label_mean = feats[LABEL_COL].mean()
     assert label_mean < 0.4, f"Expected mostly 0s, got mean={label_mean:.2f}"

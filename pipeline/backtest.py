@@ -81,6 +81,7 @@ def _sector(sym: str) -> str:
 
 def run_swing_backtest(
     model_path: str = "models/model.pkl",
+    model=None,
     symbols: list[str] | None = None,
     start: str = "2022-01-01",
     end: str = "2022-12-31",
@@ -95,17 +96,41 @@ def run_swing_backtest(
     max_per_sector: int = 3,
     max_positions: int = 10,
     max_short_positions: int = 5,
+    entry_mode: str = "threshold",
+    rank_long_k: int = 5,
+    rank_short_k: int = 5,
+    cost_bps: float = 5.0,
+    target_mode: str = "abs_3d",
     verbose: bool = False,
 ) -> dict:
-    """Run a full portfolio backtest and return trades + portfolio DataFrames + metrics."""
+    """Run a full portfolio backtest and return trades + portfolio DataFrames + metrics.
+
+    Args:
+        model: Pre-loaded StockEnsemble. If None, loads from model_path.
+        entry_mode:
+            "threshold" — long when proba > buy_threshold, short when
+                          proba < short_threshold (fixed cutoffs).
+            "rank"      — long the top rank_long_k of the day's cross-sectional
+                          proba ranking, short the bottom rank_short_k. Adapts
+                          to compressed proba distributions; longs still
+                          require proba above the day's median, shorts below.
+        cost_bps: One-way slippage+spread cost in basis points applied to
+                  every fill (5 = 0.05%). Buys/covers fill higher, sells/
+                  shorts fill lower.
+        target_mode: Passed to build_features — must match the label the
+                     model was trained on.
+    """
     from pipeline.model import StockEnsemble
 
     symbols = symbols or DEFAULT_UNIVERSE
     # Extra warmup so indicators (MA50, RSI etc.) are stable at start date
     warmup_start = (pd.Timestamp(start) - pd.Timedelta(days=200)).strftime("%Y-%m-%d")
 
-    print(f"  Loading model from {model_path} ...")
-    model = StockEnsemble.load(Path(model_path))
+    if model is None:
+        print(f"  Loading model from {model_path} ...")
+        model = StockEnsemble.load(Path(model_path))
+
+    cost = cost_bps / 10_000.0
 
     # ── Phase 1: Fetch data & build signal series per symbol ──────────────────
     print(f"  Fetching data for {len(symbols)} symbols  ({start} to {end}) ...")
@@ -121,7 +146,7 @@ def run_swing_backtest(
     for sym in symbols:
         try:
             ohlcv = fetch(sym, start=warmup_start, end=end)
-            feats = build_features(ohlcv, macro=macro)
+            feats = build_features(ohlcv, macro=macro, target_mode=target_mode)
             feat_rows = feats[FEATURE_COLS].dropna()
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -194,6 +219,8 @@ def run_swing_backtest(
                     p = _next_open(ohlcv_sym, next_date)
                     if p is not None:
                         exit_price = p
+                # Slippage: covers fill above the print, sells below it
+                exit_price *= (1 + cost) if is_short else (1 - cost)
 
                 if is_short:
                     actual_pnl_pct = (pos["entry_price"] - exit_price) / pos["entry_price"]
@@ -263,64 +290,69 @@ def run_swing_backtest(
                 short_sector[sec] = short_sector.get(sec, 0) + 1
                 n_shorts += 1
 
-        # Long candidates — highest proba first
-        long_candidates = sorted(
-            [(s, p) for s, p in signals.items()
-             if p >= buy_threshold
-             and s not in positions
-             and long_sector.get(_sector(s), 0) < max_per_sector
-             and n_longs < max_positions],
-            key=lambda x: -x[1],
-        )
+        # Candidate selection — threshold (fixed cutoffs) or rank (cross-sectional)
+        if entry_mode == "rank":
+            ranked = sorted(signals.items(), key=lambda x: -x[1])
+            day_median = float(np.median([p for _, p in ranked])) if ranked else 0.5
+            long_candidates = [(s, p) for s, p in ranked[:rank_long_k] if p > day_median]
+            short_candidates = [(s, p) for s, p in ranked[-rank_short_k:] if p < day_median]
+            short_candidates.sort(key=lambda x: x[1])
+        else:
+            long_candidates = sorted(
+                [(s, p) for s, p in signals.items() if p >= buy_threshold],
+                key=lambda x: -x[1],
+            )
+            short_candidates = sorted(
+                [(s, p) for s, p in signals.items() if p < short_threshold],
+                key=lambda x: x[1],
+            )
+
         for sym, _ in long_candidates:
             if n_longs >= max_positions:
                 break
+            if sym in positions or long_sector.get(_sector(sym), 0) >= max_per_sector:
+                continue
             ohlcv_sym = price_matrix.get(sym, pd.DataFrame())
             entry_price = _next_open(ohlcv_sym, next_date)
             if not entry_price or entry_price <= 0:
                 continue
+            entry_price *= (1 + cost)  # buys fill above the print
             qty = max(1, int(max_alloc / entry_price))
-            cost = qty * entry_price
-            if cost > cash * 0.95:
+            outlay = qty * entry_price
+            if outlay > cash * 0.95:
                 continue
-            cash -= cost
+            cash -= outlay
             positions[sym] = {
                 "side": "long",
                 "entry_price": entry_price,
                 "entry_date": next_date,
                 "qty": qty,
-                "cost": cost,
+                "cost": outlay,
             }
             long_sector[_sector(sym)] = long_sector.get(_sector(sym), 0) + 1
             n_longs += 1
 
-        # Short candidates — lowest proba first (highest conviction short)
-        short_candidates = sorted(
-            [(s, p) for s, p in signals.items()
-             if p < short_threshold
-             and s not in positions
-             and short_sector.get(_sector(s), 0) < max_per_sector
-             and n_shorts < max_short_positions],
-            key=lambda x: x[1],
-        )
         for sym, _ in short_candidates:
             if n_shorts >= max_short_positions:
                 break
+            if sym in positions or short_sector.get(_sector(sym), 0) >= max_per_sector:
+                continue
             ohlcv_sym = price_matrix.get(sym, pd.DataFrame())
             entry_price = _next_open(ohlcv_sym, next_date)
             if not entry_price or entry_price <= 0:
                 continue
+            entry_price *= (1 - cost)  # shorts fill below the print
             qty = max(1, int(max_alloc / entry_price))
-            cost = qty * entry_price  # margin collateral
-            if cost > cash * 0.95:
+            outlay = qty * entry_price  # margin collateral
+            if outlay > cash * 0.95:
                 continue
-            cash -= cost
+            cash -= outlay
             positions[sym] = {
                 "side": "short",
                 "entry_price": entry_price,
                 "entry_date": next_date,
                 "qty": qty,
-                "cost": cost,
+                "cost": outlay,
             }
             short_sector[_sector(sym)] = short_sector.get(_sector(sym), 0) + 1
             n_shorts += 1
@@ -333,6 +365,7 @@ def run_swing_backtest(
             continue
         cp = float(ohlcv_sym.loc[last_date, "Close"])
         is_short = pos["side"] == "short"
+        cp *= (1 + cost) if is_short else (1 - cost)
         if is_short:
             pnl_pct = (pos["entry_price"] - cp) / pos["entry_price"]
             pnl_dollar = pos["qty"] * pos["entry_price"] * pnl_pct
