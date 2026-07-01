@@ -162,10 +162,10 @@ def main():
     )
     p_wf.add_argument("--start-year", type=int, default=2021,
                       help="First out-of-sample test year")
-    p_wf.add_argument("--target", default="abs_3d", choices=["abs_3d", "rel_5d"],
-                      help="Label the model trains on")
-    p_wf.add_argument("--entry", default="rank", choices=["rank", "threshold"],
-                      help="Entry selection: cross-sectional rank or fixed thresholds")
+    p_wf.add_argument("--target", default="rel_5d", choices=["abs_3d", "rel_5d"],
+                      help="Label the model trains on (rel_5d won the 2026-07 head-to-head)")
+    p_wf.add_argument("--entry", default="threshold", choices=["rank", "threshold"],
+                      help="Entry selection (threshold won the 2026-07 head-to-head)")
     p_wf.add_argument("--cost-bps", type=float, default=5.0,
                       help="One-way slippage cost in basis points")
     p_wf.add_argument("--capital", type=float, default=50_000)

@@ -175,7 +175,9 @@ def _generate_signals(model, symbols: list[str]) -> dict[str, float]:
     signals: dict[str, float] = {}
     for sym in symbols:
         try:
-            feats = build_features_for_symbol(sym)
+            # drop_unlabeled=False keeps the label-horizon tail rows so
+            # iloc[-1] is today's bar, not a 5-day-stale one
+            feats = build_features_for_symbol(sym, drop_unlabeled=False)
             if feats.empty:
                 log.warning("  %s: empty features, skipping", sym)
                 continue

@@ -100,7 +100,7 @@ def run_swing_backtest(
     rank_long_k: int = 5,
     rank_short_k: int = 5,
     cost_bps: float = 5.0,
-    target_mode: str = "abs_3d",
+    target_mode: str = "rel_5d",
     verbose: bool = False,
 ) -> dict:
     """Run a full portfolio backtest and return trades + portfolio DataFrames + metrics.
@@ -146,7 +146,10 @@ def run_swing_backtest(
     for sym in symbols:
         try:
             ohlcv = fetch(sym, start=warmup_start, end=end)
-            feats = build_features(ohlcv, macro=macro, target_mode=target_mode)
+            # drop_unlabeled=False: signals must exist for the final label-horizon
+            # days of the test window (labels aren't used for inference)
+            feats = build_features(ohlcv, macro=macro, target_mode=target_mode,
+                                   drop_unlabeled=False)
             feat_rows = feats[FEATURE_COLS].dropna()
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")

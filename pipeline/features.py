@@ -95,7 +95,8 @@ def _fetch_macro(start: str, end: str) -> pd.DataFrame:
 def build_features(
     df: pd.DataFrame,
     macro: pd.DataFrame | None = None,
-    target_mode: str = "abs_3d",
+    target_mode: str = "rel_5d",
+    drop_unlabeled: bool = True,
 ) -> pd.DataFrame:
     """Compute all features from an OHLCV DataFrame.
 
@@ -104,17 +105,22 @@ def build_features(
         macro: Optional pre-fetched macro DataFrame (VIX, TNX columns).
                If None, macro columns will be NaN.
         target_mode: Label definition —
-            "abs_3d": 1 if absolute return over the next 3 trading days
-                      exceeds +0.5%. Matches the live strategy (3-day max
-                      hold, absolute P&L) so the model predicts what the
-                      account actually earns.
             "rel_5d": 1 if stock beats SPY by >0.3% over the next 5 days.
-                      Legacy label — a stock can beat SPY while falling, so
-                      this is mismatched with the absolute-return trading
-                      rule; kept for comparison experiments.
+                      Default: walk-forward 2021-2026 validated this label
+                      (+35.6% OOS, PF 1.18) over the abs_3d alternative.
+            "abs_3d": 1 if absolute return over the next 3 trading days
+                      exceeds +0.5%. Tested 2026-07: LOST the walk-forward
+                      head-to-head (-14.1% OOS) — predicting absolute
+                      direction is mostly predicting market beta, which
+                      this feature set cannot do. Kept for experiments.
+        drop_unlabeled: If True (training), drop rows whose forward-return
+            window extends past the data end — they have no label. If False
+            (inference), keep them with Target=NaN so the latest row is
+            genuinely the latest bar, not label-horizon days stale.
 
     Returns:
-        DataFrame with FEATURE_COLS + Target column, NaN rows dropped.
+        DataFrame with FEATURE_COLS + Target column; rows with NaN features
+        always dropped.
     """
     out = df.copy()
 
@@ -175,21 +181,23 @@ def build_features(
     out["Rel_Return_1d"] = out["Return_1d"] - out["SPY_Return_1d"]
     out["Rel_Return_5d"] = out["Return_5d"] - out["SPY_Return_5d"]
 
-    if target_mode == "abs_3d":
-        stock_3d = out["Close"].shift(-3) / out["Close"] - 1
-        out[LABEL_COL] = (stock_3d > 0.005).astype(int)
-        # Rows whose forward window extends past the data end have no label
-        out.loc[out["Close"].shift(-3).isna(), LABEL_COL] = np.nan
-    elif target_mode == "rel_5d":
+    if target_mode == "rel_5d":
         stock_5d = out["Close"].shift(-5) / out["Close"] - 1
         spy_5d = out["SPY_Return_5d"].shift(-5)
-        out[LABEL_COL] = ((stock_5d - spy_5d) > 0.003).astype(int)
+        out[LABEL_COL] = ((stock_5d - spy_5d) > 0.003).astype(float)
+        # Rows whose forward window extends past the data end have no label
         out.loc[out["Close"].shift(-5).isna(), LABEL_COL] = np.nan
+    elif target_mode == "abs_3d":
+        stock_3d = out["Close"].shift(-3) / out["Close"] - 1
+        out[LABEL_COL] = (stock_3d > 0.005).astype(float)
+        out.loc[out["Close"].shift(-3).isna(), LABEL_COL] = np.nan
     else:
         raise ValueError(f"Unknown target_mode: {target_mode!r}")
 
-    out = out[FEATURE_COLS + [LABEL_COL]].dropna()
-    out[LABEL_COL] = out[LABEL_COL].astype(int)
+    out = out[FEATURE_COLS + [LABEL_COL]].dropna(subset=FEATURE_COLS)
+    if drop_unlabeled:
+        out = out.dropna(subset=[LABEL_COL])
+        out[LABEL_COL] = out[LABEL_COL].astype(int)
     return out
 
 
@@ -198,7 +206,8 @@ def build_features_for_symbol(
     start: str = "2015-01-01",
     end: str | None = None,
     include_macro: bool = True,
-    target_mode: str = "abs_3d",
+    target_mode: str = "rel_5d",
+    drop_unlabeled: bool = True,
 ) -> pd.DataFrame:
     """Convenience: fetch OHLCV + macro and return feature matrix."""
     from pipeline.data import fetch as _fetch
@@ -213,4 +222,5 @@ def build_features_for_symbol(
         except Exception:
             pass  # macro optional; columns will be NaN
 
-    return build_features(ohlcv, macro=macro, target_mode=target_mode)
+    return build_features(ohlcv, macro=macro, target_mode=target_mode,
+                          drop_unlabeled=drop_unlabeled)
