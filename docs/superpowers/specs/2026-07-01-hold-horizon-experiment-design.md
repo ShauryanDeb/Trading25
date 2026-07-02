@@ -1,8 +1,8 @@
 # Hold-Horizon Experiment — Design Spec
 
 Date: 2026-07-01
-Status: Approved by user (design + fallback rule)
-Repo: `Trading25/` (not a git repository — spec not committed)
+Status: Approved by user (design + fallback rule); executed — see Results
+Repo: `Trading25/`, branch `experiment/hold-horizon`
 
 ## Context
 
@@ -85,6 +85,32 @@ Primary (hold=7) is accepted iff ALL of:
 criterion 1, the neighbor may be promoted only if it also (a) beats the
 baseline at 10 bps one-way costs and (b) improves ≥4 of 6 years — and it is
 reported with an explicit "selected post-hoc" caveat.
+
+## Results (2026-07-01, appended after execution)
+
+Control (hold=3) matched the pristine `run.py walkforward` output exactly
+(+35.92% / PF 1.178 / 2,370 trades — the small drift vs the doc's +35.6% is
+two extra days of data), validating the shared-training shortcut. The primary
+was then re-confirmed end-to-end through the untouched
+`pipeline.walkforward.walk_forward(max_hold_days=7)` — identical to the sweep
+on every yearly row (`reports/walkforward_rel5d_threshold_hold7_confirm.csv`).
+
+| Run | Total | PF | Sharpe | Max DD | Trades |
+|-----|-------|----|--------|--------|--------|
+| Control 3 | +35.92% | 1.178 | 0.81 | -10.9% | 2,370 |
+| Neighbor 5 | +39.17% | 1.213 | 0.86 | -10.6% | 1,983 |
+| **Primary 7** | **+41.94%** | **1.228** | **0.89** | **-8.2%** | **1,695** |
+| Neighbor 10 | +39.91% | 1.238 | 0.83 | -8.6% | 1,354 |
+
+All four pre-registered criteria passed: (1) +41.94% > +35.6% and PF 1.228 >
+1.18; (2) 4 of 6 years improved (2022, 2023, 2024, 2025; 2021 and 2026H1 got
+worse); (3) both neighbors beat the control — smooth response surface; (4)
+trade count fell 28.5% (2,370 → 1,695). Avg PnL per trade rose from $7.49 to
+$12.01. **ACCEPTED.** The fallback rule was not needed.
+
+Honest caveats: 2026H1 degraded (+7.80% → +4.96%); the strategy still lags
+SPY buy-and-hold (+118%) by a wide margin; PF 1.228 remains a modest edge.
+Nothing here authorizes `--live` — that remains a separate, explicit decision.
 
 ## Reporting
 
